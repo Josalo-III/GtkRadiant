@@ -32,6 +32,9 @@ class Config:
         if ( self.platform in ['FreeBSD', 'OpenBSD', 'NetBSD'] ):
             self.cc = 'cc'
             self.cxx = 'c++'
+        elif ( self.platform == 'Darwin' ):
+            self.cc = 'clang'
+            self.cxx = 'clang++'
         else:
             self.cc = 'gcc'
             self.cxx = 'g++'
@@ -260,9 +263,8 @@ class Config:
             if ( self.platform == 'NetBSD'):
                 pnglibs = 'png16'
             env.Append( LIBS = pnglibs.split( ' ' ) )
+        if ( useZ ):
             env.ParseConfig( 'pkg-config zlib --cflags --libs' )
-            if ( useZ ):
-                env.ParseConfig( 'pkg-config zlib --cflags --libs' )
 
         env.Append( CCFLAGS = baseflags )
         env.Append( CXXFLAGS = baseflags + [ '-fpermissive', '-fvisibility-inlines-hidden' ] )
@@ -281,9 +283,11 @@ class Config:
             
         # On Mac, we pad headers so that we may rewrite them for packaging
         if ( self.platform == 'Darwin' ) :
-            env.Append( CFLAGS = [ '-mmacosx-version-min=10.9' ] )
-            env.Append( CXXFLAGS = [ '-mmacosx-version-min=10.9' ] )
-            env.Append( LINKFLAGS = [ '-headerpad_max_install_names' ] )
+            minimum_version = '11.0' if platform.machine() == 'arm64' else '10.9'
+            minimum_flag = '-mmacosx-version-min=%s' % minimum_version
+            env.Append( CFLAGS = [ minimum_flag ] )
+            env.Append( CXXFLAGS = [ minimum_flag ] )
+            env.Append( LINKFLAGS = [ minimum_flag, '-headerpad_max_install_names' ] )
 
     def CheckoutOrUpdate( self, svnurl, path ):
         if ( os.path.exists( path ) ):

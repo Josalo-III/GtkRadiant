@@ -9,7 +9,7 @@ import platform
 Import( [ 'utils', 'config', 'settings', 'lib_objects' ] )
 
 env = Environment( ENV = os.environ )
-settings.SetupEnvironment( env, config['name'] )
+settings.SetupEnvironment( env, config['name'], useZ = True )
 env.Prepend( CPPPATH = [ '#tools/quake3/common' ] )
 if platform.system() == "NetBSD":
     env.Append( LIBS = [ 'm', 'pthread', 'jpeg', 'png16' ] )

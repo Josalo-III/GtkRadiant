@@ -78,7 +78,7 @@ void PicoPrintFunc( int level, const char *str ){
    callback for picomodel.lib
  */
 
-void PicoLoadFileFunc( char *name, byte **buffer, int *bufSize ){
+void PicoLoadFileFunc( const char *name, byte **buffer, int *bufSize ){
 	*bufSize = vfsLoadFile( (const char*) name, (void**) buffer, 0 );
 }
 

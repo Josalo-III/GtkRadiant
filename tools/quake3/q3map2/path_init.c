@@ -263,13 +263,13 @@ void AddHomeBasePath( char *path ){
 
 
 	/* dummy check */
-	if ( path == NULL || path[ 0 ] == '\0' ) {
+	if ( path == NULL || path[ 0 ] == '\0' || numBasePaths >= MAX_BASE_PATHS ) {
 		return;
 	}
 
 	/* make a hole */
-	for ( i = 0; i < ( MAX_BASE_PATHS - 1 ); i++ )
-		basePaths[ i + 1 ] = basePaths[ i ];
+	for ( i = numBasePaths; i > 0; i-- )
+		basePaths[ i ] = basePaths[ i - 1 ];
 
 	/* concatenate home dir and path */
 	sprintf( temp, "%s/%s", homePath, path );

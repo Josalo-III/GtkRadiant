@@ -54,7 +54,13 @@ if ( os.path.exists( conf_filename ) ):
 		pass
 
 # read the command line and build configs
-config_statements = sys.argv[1:]
+# SCons options such as -j and --no-packs are also present in sys.argv.  They
+# are not GtkRadiant configuration statements and must not stop parsing based
+# on their position on the command line.
+config_statements = [
+	argument for argument in sys.argv[1:]
+	if '=' in argument and not argument.startswith( '-' )
+]
 active_configs = config.ConfigParser().parseStatements( active_configs, config_statements )
 assert( len( active_configs ) >= 1 )
 

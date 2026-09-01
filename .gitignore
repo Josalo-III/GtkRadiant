@@ -5,6 +5,7 @@
 /build
 /install
 /packs
+/.macos-work
 /tools/urt/tools/quake3/q3map2/Debug
 /tools/urt/tools/quake3/q3map2/Release
 /.sconsign.dblite
@@ -25,8 +26,3 @@
 *.tlog
 *.vcxproj.user
 *.zip
-
-
-
-
-
