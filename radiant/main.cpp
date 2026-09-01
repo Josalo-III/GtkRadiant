@@ -35,7 +35,9 @@
 #endif
 
 #include <gtk/gtk.h>
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 #include <gtk/gtkgl.h>
+#endif
 #include <glib/gi18n.h>
 #include "stdafx.h"
 #include <assert.h>
@@ -417,8 +419,10 @@ int mainRadiant( int argc, char* argv[] ) {
 //  gtk_disable_setlocale();
 
 	gtk_init( &argc, &argv );
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_gl_init( &argc, &argv );
 	gdk_gl_init( &argc, &argv );
+#endif
 
 	// TODO: Find a better place to call this.
 	gtk_glwidget_create_font();

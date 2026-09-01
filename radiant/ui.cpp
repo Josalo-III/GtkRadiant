@@ -61,6 +61,13 @@ static void motion( GtkWidget *widget, GdkEventMotion *event, gpointer data ){
 	pListen->OnMouseMove( event->state, event->x, event->y );
 }
 
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+static gboolean render( GtkGLArea *widget, GdkGLContext *context, gpointer data ){
+	CGtkWindow *pWindow = static_cast<CGtkWindow *>( data );
+	pWindow->DoExpose();
+	return TRUE;
+}
+#else
 static gint expose( GtkWidget *widget, GdkEventExpose *event, gpointer data ){
 	if ( event->count > 0 ) {
 		return TRUE;
@@ -71,6 +78,7 @@ static gint expose( GtkWidget *widget, GdkEventExpose *event, gpointer data ){
 
 	return TRUE;
 }
+#endif
 
 // we use the string versions of the keys for now..
 static gint keypress( GtkWidget* widget, GdkEventKey* event, gpointer data ){
@@ -134,7 +142,11 @@ bool CGtkWindow::Show(){
 						   GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK );
 
 	// Connect signal handlers
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	g_signal_connect( G_OBJECT( m_pGLWidget ), "render", G_CALLBACK( render ), this );
+#else
 	g_signal_connect( G_OBJECT( m_pGLWidget ), "expose-event", G_CALLBACK( expose ), this );
+#endif
 	g_signal_connect( G_OBJECT( m_pGLWidget ), "motion-notify-event",
 						G_CALLBACK( motion ), m_pListen );
 	g_signal_connect( G_OBJECT( m_pGLWidget ), "button-press-event",

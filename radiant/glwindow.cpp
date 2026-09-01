@@ -47,6 +47,17 @@ static void realize( GtkWidget *widget, gpointer data ){
 	wnd->OnCreate();
 }
 
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+static gboolean render( GtkGLArea *widget, GdkGLContext *context, gpointer data ){
+	GLWindow *wnd = (GLWindow*)data;
+
+	if ( !g_pParentWnd->IsSleeping() ) {
+		wnd->OnExpose();
+	}
+
+	return TRUE;
+}
+#else
 static gint expose( GtkWidget *widget, GdkEventExpose *event, gpointer data ){
 	GLWindow *wnd = (GLWindow*)data;
 
@@ -62,6 +73,7 @@ static gint expose( GtkWidget *widget, GdkEventExpose *event, gpointer data ){
 
 	return TRUE;
 }
+#endif
 
 static void button_press( GtkWidget *widget, GdkEventButton *event, gpointer data ){
 	GLWindow *wnd = (GLWindow*)data;
@@ -208,7 +220,11 @@ GLWindow::GLWindow( bool zbuffer ) {
 
 	// Connect signal handlers
 	g_signal_connect( G_OBJECT( m_pWidget ), "realize", G_CALLBACK( realize ), this );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	g_signal_connect( G_OBJECT( m_pWidget ), "render", G_CALLBACK( render ), this );
+#else
 	g_signal_connect( G_OBJECT( m_pWidget ), "expose-event", G_CALLBACK( expose ), this );
+#endif
 	g_signal_connect( G_OBJECT( m_pWidget ), "motion-notify-event", G_CALLBACK( motion ), this );
 	g_signal_connect( G_OBJECT( m_pWidget ), "button-press-event", G_CALLBACK( button_press ), this );
 	g_signal_connect( G_OBJECT( m_pWidget ), "button-release-event",G_CALLBACK( button_release ), this );

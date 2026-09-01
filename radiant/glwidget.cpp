@@ -28,16 +28,60 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// OpenGL widget based on GtkGLExt
+// OpenGL widget based on GtkGLArea (GTK3) or GtkGLExt (GTK2)
 
 #include "stdafx.h"
 
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 #include <gtk/gtkgl.h>
+#endif
 
 #include <pango/pangoft2.h>
 
 #include "glwidget.h"
 #include "qgl.h"
+
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+
+GtkWidget* WINAPI gtk_glwidget_new( gboolean zbuffer, GtkWidget* share ){
+	GtkWidget* widget = gtk_gl_area_new();
+	GtkGLArea* area = GTK_GL_AREA( widget );
+
+	gtk_gl_area_set_use_es( area, FALSE );
+	gtk_gl_area_set_required_version( area, 2, 1 );
+	gtk_gl_area_set_has_alpha( area, TRUE );
+	gtk_gl_area_set_has_depth_buffer( area, zbuffer );
+	g_object_set_data( G_OBJECT( widget ), "radiant-share-widget", share );
+
+	return widget;
+}
+
+void WINAPI gtk_glwidget_destroy_context( GtkWidget *widget ){
+	// GtkGLArea owns and destroys its context with the widget.
+}
+
+void WINAPI gtk_glwidget_create_context( GtkWidget *widget ){
+	// GtkGLArea creates its context when the widget is realized.
+}
+
+void WINAPI gtk_glwidget_swap_buffers( GtkWidget *widget ){
+	// GtkGLArea presents its framebuffer after the render signal returns.
+}
+
+gboolean WINAPI gtk_glwidget_make_current( GtkWidget *widget ){
+	GtkGLArea* area = GTK_GL_AREA( widget );
+	gtk_gl_area_make_current( area );
+
+	GError* error = gtk_gl_area_get_error( area );
+	if ( error != NULL ) {
+		Sys_FPrintf( SYS_ERR, "ERROR: GtkGLArea context: %s\n", error->message );
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+#else
 
 typedef int* attribs_t;
 typedef const attribs_t* configs_iterator;
@@ -202,6 +246,8 @@ gboolean WINAPI gtk_glwidget_make_current( GtkWidget *widget ){
 	GdkGLDrawable *gldrawable = gtk_widget_get_gl_drawable( widget );
 	return gdk_gl_drawable_gl_begin( gldrawable, glcontext );
 }
+
+#endif
 
 
 // Think about rewriting this font stuff to use OpenGL display lists and glBitmap().

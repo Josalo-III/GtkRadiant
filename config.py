@@ -78,7 +78,9 @@ class Config:
             else:
                 self.dependency_prefix = ''
         if not hasattr( self, 'gtk_version' ):
-            self.gtk_version = '3' if self.platform == 'Darwin' else '2'
+            # Prefer the maintained GTK generation wherever dependencies come
+            # from the host. Windows still uses the repository's GTK2 runtime.
+            self.gtk_version = self._defaultGtkVersion( self.platform )
         if not hasattr( self, 'graphics_backend' ):
             self.graphics_backend = 'x11'
         if not hasattr( self, 'macosx_deployment_target' ):
@@ -90,6 +92,10 @@ class Config:
             self._validated_pkg_packages = set()
         if not hasattr( self, '_validated_libraries' ):
             self._validated_libraries = set()
+
+    @staticmethod
+    def _defaultGtkVersion( platform_name ):
+        return '2' if platform_name == 'Windows' else '3'
 
     @staticmethod
     def _singleValue( name, ops ):
@@ -396,7 +402,7 @@ class Config:
         if self.gtk_version == '2':
             packages += [ 'glu', 'gtkglext-1.0' ]
         else:
-            packages.append( 'gl' )
+            packages += [ 'gl', 'pangoft2' ]
             if self.graphics_backend == 'x11':
                 packages.append( 'glx' )
         for package in packages:
@@ -442,6 +448,7 @@ class Config:
                 self._parsePkgConfig( env, 'gtkglext-1.0' )
             else:
                 self._parsePkgConfig( env, 'gl' )
+                self._parsePkgConfig( env, 'pangoft2' )
                 if self.graphics_backend == 'x11':
                     self._parsePkgConfig( env, 'glx' )
         if ( useJPEG ):
@@ -798,6 +805,12 @@ class TestConfigParse( unittest.TestCase ):
         self.assertEqual( configs[0].gtk_version, '3' )
         self.assertEqual( configs[0].graphics_backend, 'x11' )
         self.assertEqual( configs[0].macosx_deployment_target, '11.0' )
+
+    def testDefaultGtkVersion( self ):
+        self.assertEqual( Config._defaultGtkVersion( 'Darwin' ), '3' )
+        self.assertEqual( Config._defaultGtkVersion( 'Linux' ), '3' )
+        self.assertEqual( Config._defaultGtkVersion( 'FreeBSD' ), '3' )
+        self.assertEqual( Config._defaultGtkVersion( 'Windows' ), '2' )
 
     def testInvalidMacBuildConfiguration( self ):
         with self.assertRaises( ValueError ):

@@ -69,7 +69,7 @@ check_environment() {
   echo "PKG_CONFIG_LIBDIR: $pkg_config_libdir"
   echo "compiler target: $(run_isolated /usr/bin/clang -dumpmachine)"
 
-  for package in gtk+-3.0 gdk-x11-3.0 gl glx x11 libxml-2.0 glib-2.0 libpng zlib; do
+  for package in gtk+-3.0 gdk-x11-3.0 gl glx x11 pangoft2 libxml-2.0 glib-2.0 libpng zlib; do
     if ! version=$(run_isolated "$pkg_config" --modversion "$package" 2>/dev/null); then
       echo "error: pkg-config package is unavailable: $package" >&2
       status=1
