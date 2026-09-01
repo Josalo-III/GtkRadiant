@@ -28,6 +28,10 @@ Default build (release), just run scons at the toplevel
 debug build:
 $ scons config=debug
 
+explicit macOS dependency configuration:
+$ scons dependency_prefix=/opt/local gtk_version=3 \
+    graphics_backend=x11 macosx_deployment_target=11.0
+
 build using 8 parallel build jobs
 but do not download any game packs
 $ scons -j8 --no-packs

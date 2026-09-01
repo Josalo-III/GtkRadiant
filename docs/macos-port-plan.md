@@ -413,6 +413,54 @@ visual context can be checked. They do not block command-line port validation.
 Exit criterion: two clean builds select the same headers and libraries and all
 linked non-system libraries have the intended architecture and prefix.
 
+#### Phase 2 implementation status
+
+The SCons configuration now persists and prints four explicit settings:
+
+```sh
+dependency_prefix=/opt/local
+gtk_version=3
+graphics_backend=x11
+macosx_deployment_target=11.0
+```
+
+These are the Darwin arm64 defaults, but they remain command-line settings so
+the build record is self-describing. Configurations saved by the older build
+scripts are upgraded when loaded. The arm64 deployment target rejects values
+older than macOS 11.0, and X11 is the only accepted graphics backend until a
+second backend is deliberately implemented.
+
+SCons no longer invokes a bare `pkg-config`. When `dependency_prefix` is set,
+it uses that prefix's executable with a private `PKG_CONFIG_LIBDIR` containing
+only the prefix's `lib/pkgconfig` and `share/pkgconfig`; inherited
+`PKG_CONFIG_PATH` is removed. Every package must report a prefix within the
+selected dependency tree. On Darwin, its explicitly linked libraries are also
+checked for the host architecture before build rules are emitted.
+
+The selected GUI stack is audited even during a command-line-only build. The
+current audit covers libxml2, GLib, zlib, libjpeg, libpng, GTK 3, GDK X11, X11,
+OpenGL, and GLX. GTK 2 and GtkGLExt remain selectable only as a compatibility
+configuration for other platforms; they are not the Mac target. JPEG and PNG
+are now discovered through the same deterministic MacPorts path rather than
+bare linker names.
+
+Build products can be audited independently with:
+
+```sh
+apple/macos-env.sh /usr/bin/python3 apple/audit-macos-build.py \
+  install/q3map2 install/q3map2_urt install/q3data
+```
+
+The audit verifies the product architecture and exact deployment target, then
+checks every direct non-system runtime dependency for existence, `/opt/local`
+containment, and arm64 support. At the first Phase 2 checkpoint, all three CLI
+tools pass and resolve six distinct non-system runtime libraries.
+
+Two successive clean `-j10` builds completed successfully. Their combined
+`pkg-config` flags and direct `otool -L` linkage signatures were identical, and
+the product/runtime audit passed after each build. Phase 2's exit criterion is
+therefore met for the current CLI products and selected GUI dependency stack.
+
 ### Phase 3: GTK3 source migration
 
 - Port shared UI code from GTK2 to GTK3 in reviewable groups.

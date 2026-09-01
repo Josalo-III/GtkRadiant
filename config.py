@@ -5,8 +5,8 @@ import os
 import traceback
 import platform
 import re
+import shlex
 import subprocess
-import platform
 import zipfile
 import shutil
 
@@ -39,6 +39,7 @@ class Config:
             self.cc = 'gcc'
             self.cxx = 'g++'
         self.install_directory = 'install'
+        self._ensureBuildDefaults()
 
         # platforms for which to assemble a setup
         self.setup_platforms = [ 'local', 'x86', 'x64', 'win32' ]
@@ -59,7 +60,42 @@ class Config:
         ]
 
     def __repr__( self ):
-        return 'config: target=%s config=%s' % ( self.target_selected, self.config_selected )
+        self._ensureBuildDefaults()
+        return 'config: target=%s config=%s deps=%s gtk=%s backend=%s macos=%s' % (
+            self.target_selected,
+            self.config_selected,
+            self.dependency_prefix or 'system',
+            self.gtk_version,
+            self.graphics_backend,
+            self.macosx_deployment_target or 'host-default',
+        )
+
+    def _ensureBuildDefaults( self ):
+        """Upgrade configurations pickled by older versions of the build."""
+        if not hasattr( self, 'dependency_prefix' ):
+            if self.platform == 'Darwin':
+                self.dependency_prefix = os.environ.get( 'GTKRADIANT_DEPS_PREFIX', '/opt/local' )
+            else:
+                self.dependency_prefix = ''
+        if not hasattr( self, 'gtk_version' ):
+            self.gtk_version = '3' if self.platform == 'Darwin' else '2'
+        if not hasattr( self, 'graphics_backend' ):
+            self.graphics_backend = 'x11'
+        if not hasattr( self, 'macosx_deployment_target' ):
+            if self.platform == 'Darwin':
+                self.macosx_deployment_target = '11.0' if platform.machine() == 'arm64' else '10.9'
+            else:
+                self.macosx_deployment_target = ''
+        if not hasattr( self, '_validated_pkg_packages' ):
+            self._validated_pkg_packages = set()
+        if not hasattr( self, '_validated_libraries' ):
+            self._validated_libraries = set()
+
+    @staticmethod
+    def _singleValue( name, ops ):
+        if len( ops ) != 1 or not ops[0]:
+            raise ValueError( '%s expects exactly one non-empty value' % name )
+        return ops[0]
 
     def _processTarget( self, ops ):
         self.target_selected = ops
@@ -68,13 +104,37 @@ class Config:
         self.config_selected = ops
 
     def _processCC( self, ops ):
-        self.cc = ops
+        self.cc = self._singleValue( 'cc', ops )
 
     def _processCXX( self, ops ):
-        self.cxx = ops
+        self.cxx = self._singleValue( 'cxx', ops )
 
     def _processInstallDir( self, ops ):
         self.install_directory = os.path.normpath( os.path.expanduser( ops[0] ) )
+
+    def _processDependencyPrefix( self, ops ):
+        value = self._singleValue( 'dependency_prefix', ops )
+        self.dependency_prefix = os.path.abspath( os.path.expanduser( value ) )
+
+    def _processGtkVersion( self, ops ):
+        value = self._singleValue( 'gtk_version', ops )
+        if value not in [ '2', '3' ]:
+            raise ValueError( 'gtk_version must be 2 or 3' )
+        self.gtk_version = value
+
+    def _processGraphicsBackend( self, ops ):
+        value = self._singleValue( 'graphics_backend', ops )
+        if value != 'x11':
+            raise ValueError( 'graphics_backend currently supports only x11' )
+        self.graphics_backend = value
+
+    def _processMacOSDeploymentTarget( self, ops ):
+        value = self._singleValue( 'macosx_deployment_target', ops )
+        if not re.match( r'^\d+\.\d+$', value ):
+            raise ValueError( 'macosx_deployment_target must have the form major.minor' )
+        if platform.machine() == 'arm64' and tuple( int( part ) for part in value.split( '.' ) ) < ( 11, 0 ):
+            raise ValueError( 'arm64 requires macosx_deployment_target 11.0 or newer' )
+        self.macosx_deployment_target = value
 
     def _processSetupPlatforms( self, ops ):
         self.setup_platforms = ops
@@ -83,11 +143,16 @@ class Config:
         self.setup_packs = ops
 
     def setupParser( self, operators ):
+        self._ensureBuildDefaults()
         operators['target'] = self._processTarget
         operators['config'] = self._processConfig
         operators['cc'] = self._processCC
         operators['cxx'] = self._processCXX
         operators['install_directory'] = self._processInstallDir
+        operators['dependency_prefix'] = self._processDependencyPrefix
+        operators['gtk_version'] = self._processGtkVersion
+        operators['graphics_backend'] = self._processGraphicsBackend
+        operators['macosx_deployment_target'] = self._processMacOSDeploymentTarget
         operators['setup_platforms'] = self._processSetupPlatforms
         operators['setup_packs'] = self._processSetupPacks
 
@@ -213,6 +278,19 @@ class Config:
             Default( InstallAs( os.path.join( self.install_directory, 'q3data' ), q3data ) )
 
     def emit( self ):
+        self._ensureBuildDefaults()
+        print( 'build configuration:' )
+        print( '  platform: %s (%s)' % ( self.platform, platform.machine() ) )
+        print( '  compilers: %s / %s' % ( self.cc, self.cxx ) )
+        print( '  dependency prefix: %s' % ( self.dependency_prefix or 'system search paths' ) )
+        print( '  pkg-config: %s' % self._pkgConfigPath() )
+        print( '  GTK / graphics backend: %s / %s' % ( self.gtk_version, self.graphics_backend ) )
+        if self.platform == 'Darwin':
+            print( '  macOS deployment target: %s' % self.macosx_deployment_target )
+            packages = self._validateConfiguredDarwinPackages()
+            print( '  dependency audit: %s packages are %s under %s' % (
+                len( packages ), platform.machine(), self.dependency_prefix
+            ) )
         if 'radiant' in self.target_selected:
                 self.emit_radiant()
         if 'q3map2' in self.target_selected:
@@ -228,43 +306,165 @@ class Config:
             Depends( finish_command, DEFAULT_TARGETS )
             Default( finish_command )
 
+    def _pkgConfigPath( self ):
+        if self.dependency_prefix:
+            path = os.path.join( self.dependency_prefix, 'bin', 'pkg-config' )
+            if not os.path.isfile( path ) or not os.access( path, os.X_OK ):
+                raise RuntimeError( 'pkg-config is not executable: %s' % path )
+            return path
+        path = shutil.which( 'pkg-config' )
+        if path is None:
+            raise RuntimeError( 'pkg-config was not found' )
+        return path
+
+    def _pkgConfigEnvironment( self ):
+        pkg_env = os.environ.copy()
+        if self.dependency_prefix:
+            pkg_env['PKG_CONFIG_LIBDIR'] = os.pathsep.join( [
+                os.path.join( self.dependency_prefix, 'lib', 'pkgconfig' ),
+                os.path.join( self.dependency_prefix, 'share', 'pkgconfig' ),
+            ] )
+            pkg_env.pop( 'PKG_CONFIG_PATH', None )
+        return pkg_env
+
+    def _pathWithinDependencyPrefix( self, path ):
+        return os.path.commonpath( [ self.dependency_prefix, os.path.abspath( path ) ] ) == self.dependency_prefix
+
+    def _validatePackage( self, package ):
+        if not self.dependency_prefix or package in self._validated_pkg_packages:
+            return
+
+        pkg_config = self._pkgConfigPath()
+        pkg_env = self._pkgConfigEnvironment()
+        prefix = subprocess.check_output(
+            [ pkg_config, '--variable=prefix', package ], env = pkg_env, text = True
+        ).strip()
+        if not prefix or not self._pathWithinDependencyPrefix( prefix ):
+            raise RuntimeError( '%s resolved outside dependency_prefix %s: %s' % (
+                package, self.dependency_prefix, prefix or '<empty>'
+            ) )
+
+        if self.platform == 'Darwin':
+            flags = subprocess.check_output(
+                [ pkg_config, '--libs-only-L', '--libs-only-l', package ],
+                env = pkg_env,
+                text = True,
+            )
+            tokens = shlex.split( flags )
+            library_dirs = [ token[2:] for token in tokens if token.startswith( '-L' ) ]
+            for directory in library_dirs:
+                if not self._pathWithinDependencyPrefix( directory ):
+                    raise RuntimeError( '%s added a library directory outside %s: %s' % (
+                        package, self.dependency_prefix, directory
+                    ) )
+            for token in tokens:
+                if not token.startswith( '-l' ):
+                    continue
+                library = token[2:]
+                candidates = [
+                    os.path.join( directory, 'lib%s%s' % ( library, suffix ) )
+                    for directory in library_dirs
+                    for suffix in [ '.dylib', '.a' ]
+                ]
+                path = next( ( candidate for candidate in candidates if os.path.isfile( candidate ) ), None )
+                if path is not None:
+                    self._validateLibraryArchitecture( path, package )
+
+        self._validated_pkg_packages.add( package )
+
+    def _validateLibraryArchitecture( self, path, package ):
+        real_path = os.path.realpath( path )
+        if real_path in self._validated_libraries:
+            return
+        architectures = subprocess.check_output(
+            [ '/usr/bin/lipo', '-archs', real_path ], text = True
+        ).strip().split()
+        host_architecture = platform.machine()
+        if host_architecture not in architectures:
+            raise RuntimeError( '%s library lacks %s architecture: %s (%s)' % (
+                package, host_architecture, real_path, ', '.join( architectures )
+            ) )
+        self._validated_libraries.add( real_path )
+
+    def _validateConfiguredDarwinPackages( self ):
+        packages = [ 'libxml-2.0', 'glib-2.0', 'zlib', 'libjpeg', 'libpng' ]
+        packages.append( 'gtk+-%s.0' % self.gtk_version )
+        if self.graphics_backend == 'x11':
+            if self.gtk_version == '3':
+                packages.append( 'gdk-x11-3.0' )
+            packages.append( 'x11' )
+        if self.gtk_version == '2':
+            packages += [ 'glu', 'gtkglext-1.0' ]
+        else:
+            packages.append( 'gl' )
+            if self.graphics_backend == 'x11':
+                packages.append( 'glx' )
+        for package in packages:
+            self._validatePackage( package )
+        return packages
+
+    def _parsePkgConfig( self, env, package, options = '--cflags --libs' ):
+        self._validatePackage( package )
+        pkg_env = self._pkgConfigEnvironment()
+        env.setdefault( 'ENV', {} )
+        env['ENV'].update( {
+            'PATH': pkg_env.get( 'PATH', '' ),
+            'PKG_CONFIG_LIBDIR': pkg_env.get( 'PKG_CONFIG_LIBDIR', '' ),
+        } )
+        env['ENV'].pop( 'PKG_CONFIG_PATH', None )
+        command = '%s %s %s' % (
+            shlex.quote( self._pkgConfigPath() ),
+            options,
+            shlex.quote( package ),
+        )
+        env.ParseConfig( command )
+
     def SetupEnvironment( self, env, config, useGtk = False, useGtkGL = False, useJPEG = False, useZ = False, usePNG = False ):
+        self._ensureBuildDefaults()
         env['CC'] = self.cc
         env['CXX'] = self.cxx
-        try:
-            xml2 = subprocess.check_output( ['pkg-config', '--cflags', 'libxml-2.0'] ).decode( 'utf-8' )
-        except subprocess.CalledProcessError as cpe:
-            print( 'pkg-config could not find libxml-2.0: failed with error code {} and output:{}'.format( cpe.returncode, cpe.output ) )
-            assert( False )
-        env.ParseConfig( 'pkg-config --libs libxml-2.0' )
-        #Need to strip on xml2-config output. It has a stray \n and that completely screws up scons calling g++
-        baseflags = [ '-pipe', '-Wall', '-fmessage-length=0', '-fvisibility=hidden', xml2.strip().split( ' ' ) ]
+        self._parsePkgConfig( env, 'libxml-2.0' )
+        baseflags = [ '-pipe', '-Wall', '-fmessage-length=0', '-fvisibility=hidden' ]
         if ( platform.system() == "OpenBSD" ):
-            baseflags = [ '-I/usr/X11R6/include', '-I/usr/local/include', '-pipe', '-Wall', '-fmessage-length=0', '-fvisibility=hidden', xml2.strip().split( ' ' ) ]
+            baseflags = [ '-I/usr/X11R6/include', '-I/usr/local/include' ] + baseflags
         if ( platform.system() == "NetBSD" ) :
-            baseflags = [ '-I/usr/X11R7/include', '-I/usr/include', '-pipe', '-Wall', '-fmessage-length=0', '-fvisibility=hidden', xml2.strip().split( ' ' ) ]
+            baseflags = [ '-I/usr/X11R7/include', '-I/usr/include' ] + baseflags
 
         if ( platform.system() in ['OpenBSD', 'FreeBSD', 'NetBSD'] ) :
             baseflags += ['-D__BSD__']
         if ( useGtk ):
-            env.ParseConfig( 'pkg-config gtk+-2.0 --cflags --libs' )
-            env.ParseConfig( 'pkg-config x11 --cflags --libs' )
+            self._parsePkgConfig( env, 'gtk+-%s.0' % self.gtk_version )
+            if self.graphics_backend == 'x11':
+                if self.gtk_version == '3':
+                    self._parsePkgConfig( env, 'gdk-x11-3.0' )
+                self._parsePkgConfig( env, 'x11' )
         else:
             # always setup at least glib
-            env.ParseConfig( 'pkg-config glib-2.0 --cflags --libs' )
+            self._parsePkgConfig( env, 'glib-2.0' )
 
         if ( useGtkGL ):
-            env.ParseConfig( 'pkg-config glu --cflags --libs' )
-            env.ParseConfig( 'pkg-config gtkglext-1.0 --cflags --libs' )
+            if self.gtk_version == '2':
+                self._parsePkgConfig( env, 'glu' )
+                self._parsePkgConfig( env, 'gtkglext-1.0' )
+            else:
+                self._parsePkgConfig( env, 'gl' )
+                if self.graphics_backend == 'x11':
+                    self._parsePkgConfig( env, 'glx' )
         if ( useJPEG ):
-            env.Append( LIBS = 'jpeg' )
+            if self.platform == 'Darwin':
+                self._parsePkgConfig( env, 'libjpeg' )
+            else:
+                env.Append( LIBS = 'jpeg' )
         if ( usePNG ):
-            pnglibs = 'png'
-            if ( self.platform == 'NetBSD'):
-                pnglibs = 'png16'
-            env.Append( LIBS = pnglibs.split( ' ' ) )
+            if self.platform == 'Darwin':
+                self._parsePkgConfig( env, 'libpng' )
+            else:
+                pnglibs = 'png'
+                if ( self.platform == 'NetBSD'):
+                    pnglibs = 'png16'
+                env.Append( LIBS = pnglibs.split( ' ' ) )
         if ( useZ ):
-            env.ParseConfig( 'pkg-config zlib --cflags --libs' )
+            self._parsePkgConfig( env, 'zlib' )
 
         env.Append( CCFLAGS = baseflags )
         env.Append( CXXFLAGS = baseflags + [ '-fpermissive', '-fvisibility-inlines-hidden' ] )
@@ -283,8 +483,7 @@ class Config:
             
         # On Mac, we pad headers so that we may rewrite them for packaging
         if ( self.platform == 'Darwin' ) :
-            minimum_version = '11.0' if platform.machine() == 'arm64' else '10.9'
-            minimum_flag = '-mmacosx-version-min=%s' % minimum_version
+            minimum_flag = '-mmacosx-version-min=%s' % self.macosx_deployment_target
             env.Append( CFLAGS = [ minimum_flag ] )
             env.Append( CXXFLAGS = [ minimum_flag ] )
             env.Append( LINKFLAGS = [ minimum_flag, '-headerpad_max_install_names' ] )
@@ -593,6 +792,27 @@ class TestConfigParse( unittest.TestCase ):
         # test the operator for multiple configs
         configs = self.parser.parseStatements( None, [ 'target=core', 'config=release', 'op=push', 'target=game,cgame,ui', 'config=debug' ] )
         print( repr( configs ) )
+
+    def testMacBuildConfiguration( self ):
+        configs = self.parser.parseStatements( None, [
+            'dependency_prefix=/opt/local',
+            'gtk_version=3',
+            'graphics_backend=x11',
+            'macosx_deployment_target=11.0',
+        ] )
+        self.assertEqual( configs[0].dependency_prefix, '/opt/local' )
+        self.assertEqual( configs[0].gtk_version, '3' )
+        self.assertEqual( configs[0].graphics_backend, 'x11' )
+        self.assertEqual( configs[0].macosx_deployment_target, '11.0' )
+
+    def testInvalidMacBuildConfiguration( self ):
+        with self.assertRaises( ValueError ):
+            self.parser.parseStatements( None, [ 'gtk_version=4' ] )
+        with self.assertRaises( ValueError ):
+            self.parser.parseStatements( None, [ 'graphics_backend=quartz' ] )
+        if platform.machine() == 'arm64':
+            with self.assertRaises( ValueError ):
+                self.parser.parseStatements( None, [ 'macosx_deployment_target=10.9' ] )
 
 if __name__ == '__main__':
     unittest.main()
