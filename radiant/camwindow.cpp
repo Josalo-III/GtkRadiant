@@ -26,6 +26,7 @@
 //
 
 #include "stdafx.h"
+#include "gtkutil.h"
 #include <gtk/gtk.h>
 #include <GL/gl.h>
 
@@ -138,7 +139,7 @@ void update_xor_rectangle( XORRectangle& xor_rectangle ){
 }
 
 void CamWnd::OnMouseMove( guint32 flags, int pointx, int pointy ){
-	int height = m_pWidget->allocation.height;
+	int height = gtkutil_widget_get_height( m_pWidget );
 	// NOTE RR2DO2 this hasn't got any use anymore really. It is an old qeradiant feature
 	// that can be re-enabled by removing the checks for HasCapture and not shift/ctrl down
 	// but the scaling/rotating (unless done with the steps set in the surface inspector
@@ -206,7 +207,7 @@ void CamWnd::OnRButtonUp( guint32 nFlags, int pointx, int pointy ){
 }
 
 void CamWnd::OriginalMouseUp( guint32 nFlags, int pointx, int pointy ){
-	int height = m_pWidget->allocation.height;
+	int height = gtkutil_widget_get_height( m_pWidget );
 
 	if ( g_qeglobals.d_select_mode == sel_facets_on || g_qeglobals.d_select_mode == sel_facets_off ) {
 		g_qeglobals.d_select_mode = sel_brush;
@@ -219,7 +220,7 @@ void CamWnd::OriginalMouseUp( guint32 nFlags, int pointx, int pointy ){
 }
 
 void CamWnd::OriginalMouseDown( guint32 nFlags, int pointx, int pointy ){
-	int height = m_pWidget->allocation.height;
+	int height = gtkutil_widget_get_height( m_pWidget );
 
 	SetFocus();
 	SetCapture();

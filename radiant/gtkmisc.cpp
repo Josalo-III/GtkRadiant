@@ -40,6 +40,7 @@
 #endif
 
 #include <gtk/gtk.h>
+#include "gtkutil.h"
 
 #ifdef _WIN32
 #include <gdk/gdkwin32.h>
@@ -70,8 +71,8 @@ void save_window_pos( GtkWidget *wnd, window_position_t& pos ){
 
 	get_window_pos( wnd, &pos.x, &pos.y );
 
-	pos.w = wnd->allocation.width;
-	pos.h = wnd->allocation.height;
+	pos.w = gtkutil_widget_get_width( wnd );
+	pos.h = gtkutil_widget_get_height( wnd );
 
 #ifdef DBG_WINDOWPOS
 	//Sys_Printf("save_window_pos 'Window %s'\n",buf);
@@ -94,9 +95,9 @@ void win32_get_window_pos( GtkWidget *widget, gint *x, gint *y ){
 		*x = point.x;
 		*y = point.y;
 
-		*x = max( *x,-widget->allocation.width + 10 );
+		*x = max( *x,-gtkutil_widget_get_width( widget ) + 10 );
 		*x = min( *x,primaryMonitorRect.width - 10 );
-		*y = max( *y,-widget->allocation.height + 10 );
+		*y = max( *y,-gtkutil_widget_get_height( widget ) + 10 );
 		*y = min( *y,primaryMonitorRect.height - 10 );
 	}
 	else {
@@ -1595,6 +1596,21 @@ char* WINAPI dir_dialog( void *parent, const char* title, const char* path ){
 }
 
 bool WINAPI color_dialog( void *parent, float *color, const char* title ){
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	GtkWidget* dlg = gtk_color_chooser_dialog_new( title, GTK_WINDOW( parent ) );
+	GdkRGBA rgba = { color[0], color[1], color[2], 1.0 };
+	gtk_color_chooser_set_rgba( GTK_COLOR_CHOOSER( dlg ), &rgba );
+
+	const gint response = gtk_dialog_run( GTK_DIALOG( dlg ) );
+	if ( response == GTK_RESPONSE_OK ) {
+		gtk_color_chooser_get_rgba( GTK_COLOR_CHOOSER( dlg ), &rgba );
+		color[0] = (float)rgba.red;
+		color[1] = (float)rgba.green;
+		color[2] = (float)rgba.blue;
+	}
+	gtk_widget_destroy( dlg );
+	return response == GTK_RESPONSE_OK;
+#else
 	GtkWidget* dlg;
 	double clr[3];
 	int loop = 1, ret = IDCANCEL;
@@ -1644,6 +1660,7 @@ bool WINAPI color_dialog( void *parent, float *color, const char* title ){
 	}
 
 	return false;
+#endif
 }
 
 void OpenURL( GtkWidget *parent, const char *url ){

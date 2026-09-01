@@ -406,18 +406,12 @@ class Config:
     def _parsePkgConfig( self, env, package, options = '--cflags --libs' ):
         self._validatePackage( package )
         pkg_env = self._pkgConfigEnvironment()
-        env.setdefault( 'ENV', {} )
-        env['ENV'].update( {
-            'PATH': pkg_env.get( 'PATH', '' ),
-            'PKG_CONFIG_LIBDIR': pkg_env.get( 'PKG_CONFIG_LIBDIR', '' ),
-        } )
-        env['ENV'].pop( 'PKG_CONFIG_PATH', None )
-        command = '%s %s %s' % (
-            shlex.quote( self._pkgConfigPath() ),
-            options,
-            shlex.quote( package ),
+        flags = subprocess.check_output(
+            [ self._pkgConfigPath() ] + shlex.split( options ) + [ package ],
+            env = pkg_env,
+            text = True,
         )
-        env.ParseConfig( command )
+        env.MergeFlags( flags )
 
     def SetupEnvironment( self, env, config, useGtk = False, useGtkGL = False, useJPEG = False, useZ = False, usePNG = False ):
         self._ensureBuildDefaults()

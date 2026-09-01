@@ -59,6 +59,24 @@ static gint dialog_delete_callback( GtkWidget *widget, GdkEvent* event, gpointer
 // Color selection dialog
 
 static int DoColor( COLORREF *c ){
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	GtkWidget* dlg = gtk_color_chooser_dialog_new( _( "Choose Color" ), NULL );
+	GdkRGBA rgba = {
+		( (double)GetRValue( *c ) ) / 255.0,
+		( (double)GetGValue( *c ) ) / 255.0,
+		( (double)GetBValue( *c ) ) / 255.0,
+		1.0,
+	};
+	gtk_color_chooser_set_rgba( GTK_COLOR_CHOOSER( dlg ), &rgba );
+
+	const gint response = gtk_dialog_run( GTK_DIALOG( dlg ) );
+	if ( response == GTK_RESPONSE_OK ) {
+		gtk_color_chooser_get_rgba( GTK_COLOR_CHOOSER( dlg ), &rgba );
+		*c = RGB( rgba.red * 255, rgba.green * 255, rgba.blue * 255 );
+	}
+	gtk_widget_destroy( dlg );
+	return response == GTK_RESPONSE_OK ? IDOK : IDCANCEL;
+#else
 	GtkWidget* dlg;
 	double clr[3];
 	int loop = 1, ret = IDCANCEL;
@@ -96,6 +114,7 @@ static int DoColor( COLORREF *c ){
 	}
 
 	return ret;
+#endif
 }
 
 static void Set2DText( GtkWidget* label ){

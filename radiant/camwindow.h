@@ -25,6 +25,7 @@
 class XYWnd;
 
 #include "glwindow.h"
+#include "gtkutil.h"
 
 class rectangle_t
 {
@@ -45,49 +46,36 @@ class XORRectangle
 {
 public:
 XORRectangle( GtkWidget* widget )
-	: m_widget( widget ), m_gc( NULL )
+	: m_widget( widget )
 {}
-~XORRectangle(){
-	if ( initialised() ) {
-		gdk_gc_unref( m_gc );
-	}
-}
+~XORRectangle(){}
 void set( rectangle_t rectangle ){
-	lazy_init();
 	draw();
 	m_rectangle = rectangle;
 	draw();
 }
 private:
-bool initialised() const {
-	return m_gc != NULL;
-}
-void lazy_init(){
-	if ( !initialised() ) {
-		m_gc = gdk_gc_new( m_widget->window );
-
-		GdkColor color = { 0, 0xffff, 0xffff, 0xffff, };
-		GdkColormap* colormap = gdk_window_get_colormap( m_widget->window );
-		gdk_colormap_alloc_color( colormap, &color, FALSE, TRUE );
-		gdk_gc_copy( m_gc, m_widget->style->white_gc );
-		gdk_gc_set_foreground( m_gc, &color );
-		gdk_gc_set_background( m_gc, &color );
-
-		gdk_gc_set_function( m_gc, GDK_XOR );
-	}
-}
 void draw() const {
+	GdkWindow* window = gtk_widget_get_window( m_widget );
+	if ( window == NULL ) {
+		return;
+	}
+
 	const int x = (int)m_rectangle.x;
 	const int y = (int)m_rectangle.y;
 	const int w = (int)m_rectangle.w;
 	const int h = (int)m_rectangle.h;
-	gdk_draw_rectangle( m_widget->window, m_gc, TRUE, x, -( h ) - ( y - m_widget->allocation.height ), w, h );
+	cairo_t* cr = gdk_cairo_create( window );
+	cairo_set_operator( cr, CAIRO_OPERATOR_DIFFERENCE );
+	cairo_set_source_rgb( cr, 1.0, 1.0, 1.0 );
+	cairo_rectangle( cr, x, -( h ) - ( y - gtkutil_widget_get_height( m_widget ) ), w, h );
+	cairo_fill( cr );
+	cairo_destroy( cr );
 }
 
 rectangle_t m_rectangle;
 
 GtkWidget* m_widget;
-GdkGC* m_gc;
 };
 
 class CamWnd : public GLWindow

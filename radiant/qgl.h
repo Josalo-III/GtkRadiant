@@ -34,10 +34,6 @@
 #include <GL/glx.h>
 #endif
 
-#if defined ( __APPLE__ )
-#include <GL/glu.h>
-#endif
-
 #ifndef GL_ARB_multitexture
 #define GL_TEXTURE0_ARB                   0x84C0
 #define GL_TEXTURE1_ARB                   0x84C1

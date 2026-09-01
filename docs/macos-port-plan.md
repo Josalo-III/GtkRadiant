@@ -39,6 +39,36 @@ be evaluated against the real projects that the editor is intended to recover.
 8. Keep the Linux and Windows implementations buildable while modernizing the
    shared code.
 
+## Upstream and cross-platform strategy
+
+The Mac recovery work is being developed from the current upstream
+`1.6-release` branch, which is also the upstream repository's default branch.
+The aim is not to create a permanently divergent Mac fork. Shared GTK and
+rendering modernization should be suitable for upstream use on Linux, BSD,
+Windows, and macOS.
+
+Changes will be separated by scope:
+
+- shared GTK3 API migration, maintained widget helpers, and `GtkGLArea`
+  integration belong in platform-neutral commits;
+- XQuartz launch behavior, Apple application packaging, deployment metadata,
+  and arm64-specific auditing belong in narrow `apple/` code or Darwin build
+  branches; and
+- recovery fixtures, local backup paths, and map-specific notes remain
+  development infrastructure rather than product behavior.
+
+Shared UI code should not acquire scattered `__APPLE__` branches. Where a
+platform distinction is real, it should sit behind a small interface with the
+common GTK behavior above it. Windows and Linux builds must remain visible as
+the migration proceeds. Local Mac testing cannot prove their compatibility,
+so upstream-ready work also requires CI or testing on those platforms before
+it is presented as complete.
+
+The historical upstream `gtk3` branch predates the current release branch by
+many years and diverges across hundreds of files. It will be consulted at the
+commit and function level only. Its unrelated features, assets, build files,
+and compiler changes will not be imported with the GTK conversion.
+
 ## Platform and dependency decisions
 
 ### Retain
@@ -463,14 +493,88 @@ therefore met for the current CLI products and selected GUI dependency stack.
 
 ### Phase 3: GTK3 source migration
 
-- Port shared UI code from GTK2 to GTK3 in reviewable groups.
-- Use the historical `gtk3` branch only as reviewed reference material.
+- Inventory the current GTK3 compiler failures and group them by API family
+  before making broad source edits.
+- Introduce or update small shared widget helpers where they remove repeated
+  GTK-version and platform conditionals.
+- Port the editor core in reviewable mechanical groups: object/signal access,
+  widget allocation and windows, container/layout APIs, menus and toolbars,
+  dialogs, input devices, and drawing callbacks.
+- Bring `glwidget` only to a compilable GTK3 boundary in this phase; context
+  lifecycle, sharing, rendering correctness, and removal of manual swaps are
+  Phase 4 work.
+- Port standard modules and contributed plugins after the editor core, keeping
+  each family separately reviewable.
+- Use the historical `gtk3` branch only as reviewed function-level reference.
+  Do not merge or cherry-pick its broad mixed-purpose history.
 - Preserve plugin interfaces where practical; version interfaces when an ABI
   change is unavoidable.
-- Keep Windows and Linux compilation visible during the migration.
-- Avoid unrelated map-format, renderer, and feature changes.
+- Keep Windows and Linux compilation visible during the migration, adding CI
+  or obtaining platform testing before calling the shared port upstream-ready.
+- Avoid unrelated map-format, compiler, renderer-feature, asset, and UI-feature
+  changes.
 
 Exit criterion: the editor and its standard modules compile against GTK 3.24.
+
+#### Phase 3 initial compiler survey
+
+The first `target=radiant` GTK 3.24 build was run with `-k -j10` so the survey
+would reach the editor, standard modules, and contributed plugins rather than
+stopping at the first source file. This is a diagnostic failure, as expected,
+but it establishes the first migration groups.
+
+An obsolete Apple-only inclusion of `GL/glu.h` initially prevented nearly every
+editor translation unit from reaching GTK code. It has been removed: Radiant
+already provides the only GLU-compatible operations it uses, and its public
+types come from the OpenGL header. This is shared cleanup rather than a Mac
+replacement API.
+
+The exposed GTK3 blockers are currently concentrated in these families:
+
+- 43 direct accesses to private `GtkWidget` allocation, window, or style fields
+  across 11 files;
+- the removed `GdkGC`, colormap, XOR-drawing, pixmap, and bitmap APIs;
+- GtkGLExt headers and initialization in `main.cpp` and `glwidget.cpp`;
+- direct access to the old color-selection-dialog internals;
+- the removed `GtkNotebookPage` callback type; and
+- secondary type errors caused by the common `CamWnd` and UI headers failing
+  before their consumers are compiled.
+
+Deprecated but still compilable GTK3 APIs, including the old box and table
+constructors, generate substantial warning noise but are not first-order
+blockers. They will be migrated in mechanical groups after the shared headers
+compile. The first accessor conversion uses `gtk_widget_get_allocation`, which
+is supported by the existing GTK 2.24 baseline as well as GTK3, so it does not
+need a platform branch or immediately break non-Mac builds.
+
+The historical branch's early `GtkGLArea` wrapper confirms the intended widget
+choice but does not provide a production-ready context-sharing implementation.
+It will not be copied wholesale; Phase 4 must design and verify that behavior.
+
+#### Phase 3 widget-access checkpoint
+
+The first shared widget group is complete. Direct GTK2 struct access has been
+removed from live editor and plugin code. Allocation reads use a small helper
+built on `gtk_widget_get_allocation`, preserving compatibility with both GTK
+2.24 and GTK3. Paned limits and bin children now use public properties or
+accessors, while GTK3 accelerator labels use their supported setter.
+
+The removed `GdkGC`/colormap XOR rectangle shared by camera and orthographic
+views now uses a fresh Cairo context with the difference operator. This keeps
+erase-by-redraw behavior without depending on X11 drawing primitives and is
+available on both supported GTK generations.
+
+The core and plugin color dialogs now use `GtkColorChooserDialog` under GTK3
+while retaining the existing GTK2 implementation behind a version guard. The
+notebook callback no longer names the removed `GtkNotebookPage` type, and an
+unused BobToolz `GdkPixmap` helper has been deleted.
+
+After this group, a full keep-going build reports only two compiler failures:
+the deliberate GtkGLExt includes in `main.cpp` and `glwidget.cpp`. All surveyed
+non-OpenGL widget code in the editor, standard modules, and contributed plugins
+compiles against GTK 3.24. The next unit is therefore the bounded `GtkGLArea`
+compile integration, followed by the separate lifecycle and rendering work in
+Phase 4.
 
 ### Phase 4: `GtkGLArea` and rendering integration
 

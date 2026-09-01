@@ -26,6 +26,7 @@
 //
 
 #include "stdafx.h"
+#include "gtkutil.h"
 #include <gtk/gtk.h>
 #include <glib/gi18n.h>
 #include <gdk/gdkkeysyms.h>
@@ -2319,9 +2320,9 @@ GtkWidget *watchit = NULL;
 
 void CheckWatchit( char *msg ){
 	static int width = 0;
-	if ( ( watchit != NULL ) && ( watchit->allocation.width != width ) ) {
-		Sys_Printf( "CheckWatchit %s: %d\n", msg, watchit->allocation.width );
-		width = watchit->allocation.width;
+	if ( ( watchit != NULL ) && ( gtkutil_widget_get_width( watchit ) != width ) ) {
+		Sys_Printf( "CheckWatchit %s: %d\n", msg, gtkutil_widget_get_width( watchit ) );
+		width = gtkutil_widget_get_width( watchit );
 	}
 }
 #endif
@@ -3086,12 +3087,16 @@ void MainFrame::Create(){
 			gtk_main_iteration();
 
 		{
-			int x = GTK_PANED( m_pSplits[0] )->max_position / 2 - gutter;
+			gint max_position = 0;
+			g_object_get( G_OBJECT( m_pSplits[0] ), "max-position", &max_position, NULL );
+			int x = max_position / 2 - gutter;
 			gtk_paned_set_position( GTK_PANED( m_pSplits[0] ), x );
 		}
 
 		{
-			int y = GTK_PANED( m_pSplits[1] )->max_position / 2 - gutter;
+			gint max_position = 0;
+			g_object_get( G_OBJECT( m_pSplits[1] ), "max-position", &max_position, NULL );
+			int y = max_position / 2 - gutter;
 			gtk_paned_set_position( GTK_PANED( m_pSplits[1] ), y );
 			gtk_paned_set_position( GTK_PANED( m_pSplits[2] ), y );
 		}
@@ -3756,7 +3761,10 @@ void MainFrame::ShowMenuItemKeyBindings( GtkWidget* window ){
 		}
 		else
 		{
-			GtkAccelLabel *accel_label = GTK_ACCEL_LABEL( GTK_BIN( item )->child );
+			GtkAccelLabel *accel_label = GTK_ACCEL_LABEL( gtk_bin_get_child( GTK_BIN( item ) ) );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+			gtk_accel_label_set_accel( accel_label, g_Commands[i].m_nKey, (GdkModifierType)mods );
+#else
 			GString *gstring;
 			gboolean had_mod;
 
@@ -3822,6 +3830,7 @@ void MainFrame::ShowMenuItemKeyBindings( GtkWidget* window ){
 			if ( !accel_label->accel_string ) {
 				accel_label->accel_string = g_strdup( "" );
 			}
+#endif
 
 			gtk_widget_queue_resize( GTK_WIDGET( accel_label ) );
 		}
