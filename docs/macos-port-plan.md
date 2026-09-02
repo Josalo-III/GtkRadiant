@@ -349,10 +349,11 @@ are again actively maintainable.
 
 ### Immediate next checkpoint
 
-Phase 4 is complete. Start Phase 5 by opening the staged medium recovery
-fixture, recording its first-load time and normal edit responsiveness, then
-performing the first deliberate save-round-trip to a named candidate path.
-Profile first-load texture latency before altering the legacy texture path.
+Phase 5's native compile, gameplay, and AAS smoke gates are complete. Next,
+exercise bots against the generated AAS, then use the recovered maps normally:
+begin with a copied Themepark round-trip and address its known legacy geometry
+in the editor. Keep texture-load latency as a profiling question, not an
+assumption that calls for UI threading.
 
 ## Implementation journal
 
@@ -969,6 +970,31 @@ and repaired leak area. The recovered end-of-run console
 output later established that its light pass ran all eight radiosity bounces
 and exited normally in 46 seconds; this is specifically the displayed light
 stage's timing, not a combined BSP/VIS/light benchmark.
+
+#### macOS Q3Map2 worker-pool enablement
+
+Q3Map2 already parallelizes the expensive VIS portal passes and lighting work;
+the macOS build had simply been excluded from the POSIX worker implementation
+in `tools/quake3/common/threads.c` and consequently fell back to one worker.
+The macOS path now uses that existing pool. The port keeps the platform's
+default POSIX mutex attributes (rather than Linux-only adaptive mutexes), uses
+valid `pthread_t` ownership checks, and gives `pthread_create` a conforming
+worker entry point. This is a narrow compiler fix, not a new concurrent editor
+architecture: GTK and its OpenGL contexts remain on their UI thread.
+
+The Mac project recipes now pass `-threads 8` to VIS and light stages. Eight
+matches the M1 Max's performance-core count, leaving the efficiency cores and
+some scheduling headroom for Radiant, XQuartz, and normal interactive use.
+The BSP stage is unchanged because the established worker pool is used by VIS
+and light, not a blanket promise that every compiler pass scales.
+
+On the staged `q3dm7sample` BSP, a direct eight-worker `-vis -saveprt` run
+completed successfully in 16 seconds. It processed all 15,598 active portals,
+including `BasePortalVis`, `CreatePassages`, and `PassagePortalFlow`, and wrote
+a valid 4,647,072-byte BSP. The compiler explicitly reported `threads: 8`.
+This is the first measured threaded Mac compiler result; it replaces the old
+single-worker fallback without changing the source map or adding generated
+files to version control.
 
 ### Recovered Windows 7 environment audit
 

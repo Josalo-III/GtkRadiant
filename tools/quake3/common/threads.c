@@ -416,7 +416,7 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
    =======================================================================
  */
 
-#if defined( __linux__ ) || defined( __BSD__ )
+#if defined( __linux__ ) || defined( __BSD__ ) || defined( __APPLE__ )
 #define USED
 
 int numthreads = 4;
@@ -436,7 +436,7 @@ void ThreadSetDefault( void ){
 
 typedef struct pt_mutex_s
 {
-	pthread_t       *owner;
+	pthread_t       owner;
 	pthread_mutex_t a_mutex;
 	pthread_cond_t cond;
 	unsigned int lock;
@@ -452,13 +452,13 @@ void ThreadLock( void ){
 	}
 
 	pthread_mutex_lock( &pt_mutex->a_mutex );
-	if ( pthread_equal( pthread_self(), (pthread_t)&pt_mutex->owner ) ) {
+	if ( pt_mutex->lock && pthread_equal( pthread_self(), pt_mutex->owner ) ) {
 		pt_mutex->lock++;
 	}
 	else
 	{
-		if ( ( !pt_mutex->owner ) && ( pt_mutex->lock == 0 ) ) {
-			pt_mutex->owner = (pthread_t *)pthread_self();
+		if ( pt_mutex->lock == 0 ) {
+			pt_mutex->owner = pthread_self();
 			pt_mutex->lock  = 1;
 		}
 		else
@@ -466,8 +466,8 @@ void ThreadLock( void ){
 			while ( 1 )
 			{
 				pthread_cond_wait( &pt_mutex->cond, &pt_mutex->a_mutex );
-				if ( ( !pt_mutex->owner ) && ( pt_mutex->lock == 0 ) ) {
-					pt_mutex->owner = (pthread_t *)pthread_self();
+				if ( pt_mutex->lock == 0 ) {
+					pt_mutex->owner = pthread_self();
 					pt_mutex->lock  = 1;
 					break;
 				}
@@ -488,7 +488,6 @@ void ThreadUnlock( void ){
 	pt_mutex->lock--;
 
 	if ( pt_mutex->lock == 0 ) {
-		pt_mutex->owner = NULL;
 		pthread_cond_signal( &pt_mutex->cond );
 	}
 
@@ -498,7 +497,7 @@ void ThreadUnlock( void ){
 void recursive_mutex_init( pthread_mutexattr_t attribs ){
 	pt_mutex_t *pt_mutex = &global_lock;
 
-	pt_mutex->owner = NULL;
+	pt_mutex->lock = 0;
 	if ( pthread_mutex_init( &pt_mutex->a_mutex, &attribs ) != 0 ) {
 		Error( "pthread_mutex_init failed\n" );
 	}
@@ -507,6 +506,11 @@ void recursive_mutex_init( pthread_mutexattr_t attribs ){
 	}
 
 	pt_mutex->lock = 0;
+}
+
+static void *ThreadWorkerEntry( void *arg ){
+	ThreadWorkerFunction( (int)(intptr_t)arg );
+	return NULL;
 }
 
 /*
@@ -543,6 +547,7 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 		if ( pthread_mutexattr_init( &mattrib ) != 0 ) {
 			Error( "pthread_mutexattr_init failed" );
 		}
+#if !defined( __APPLE__ )
 #if __GLIBC_MINOR__ == 1
 		if ( pthread_mutexattr_settype( &mattrib, PTHREAD_MUTEX_FAST_NP ) != 0 )
 #else
@@ -553,12 +558,16 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 #endif
 #endif
 		{ Error( "pthread_mutexattr_settype failed" ); }
+#else
+		/* macOS does not expose Linux's adaptive mutex modes; its default
+		   POSIX mutex attributes are appropriate for this short-lived pool. */
+#endif
 		recursive_mutex_init( mattrib );
 
 		for ( i = 0 ; i < numthreads ; i++ )
 		{
 			/* Default pthread attributes: joinable & non-realtime scheduling */
-			if ( pthread_create( &work_threads[i], NULL, (void*)func, (void*)(size_t)i ) != 0 ) {
+			if ( pthread_create( &work_threads[i], NULL, ThreadWorkerEntry, (void*)(intptr_t)i ) != 0 ) {
 				Error( "pthread_create failed" );
 			}
 		}
