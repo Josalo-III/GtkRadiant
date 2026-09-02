@@ -2582,6 +2582,20 @@ static ZWnd *create_floating_zwnd( MainFrame *mainframe ){
 
 static const int gutter = 12;
 
+static void enable_wide_paned_handle( GtkWidget* paned ){
+#if GTK_CHECK_VERSION( 3, 16, 0 )
+	if ( paned != NULL ) {
+		// GtkPaned's default GTK3 handle is too slight to discover reliably in
+		// the dense Radiant layout, particularly through XQuartz.  This changes
+		// only the GTK3 handle affordance; pane ownership and saved positions are
+		// still the established GTK2 behavior.
+		gtk_paned_set_wide_handle( GTK_PANED( paned ), TRUE );
+	}
+#else
+	(void)paned;
+#endif
+}
+
 void MainFrame::Create(){
 	GtkWidget* window = gtk_window_new( GTK_WINDOW_TOPLEVEL );
 	m_pWidget = window;
@@ -3102,6 +3116,10 @@ void MainFrame::Create(){
 		}
 	}
 
+	for ( int n = 0; n < 5; ++n ) {
+		enable_wide_paned_handle( m_pSplits[n] );
+	}
+
 	if ( g_PrefsDlg.mWindowInfo.nState & GDK_WINDOW_STATE_MAXIMIZED ) {
 		gtk_window_maximize( GTK_WINDOW( window ) );
 	}
@@ -3178,6 +3196,8 @@ MainFrame::MainFrame(){
 	m_pActiveXY = (XYWnd*)NULL;
 	m_bCamPreview = true;
 	m_pWatchBSP = NULL;
+	for ( int n = 0; n < 5; ++n )
+		m_pSplits[n] = NULL;
 	for ( int n = 0; n < 6; n++ )
 		m_pStatusLabel[n] = NULL;
 	m_bNeedStatusUpdate = false;

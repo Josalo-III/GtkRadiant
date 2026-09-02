@@ -700,6 +700,11 @@ bool CWindowListener::Paint(){
 	}
 
 	if ( g_bTexViewReady ) {
+		// GtkGLArea can be resized after TexTool has initialized.  The GTK2
+		// expose handler refreshed this rectangle on every paint; the IWindow
+		// route must do the same or its viewport remains at the initial size.
+		g_2DView.m_rect.bottom = g_pToolWnd->getHeight();
+		g_2DView.m_rect.right = g_pToolWnd->getWidth();
 		DoExpose();
 	}
 

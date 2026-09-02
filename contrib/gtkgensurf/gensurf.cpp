@@ -414,7 +414,13 @@ void UpdatePreview( bool DataChange ){
 			GenerateXYZ();
 		}
 
+		// GtkGLArea may only draw from its GTK3 "render" callback.  Queue the
+		// repaint so GTK owns the context and presentation lifecycle.
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+		gtk_widget_queue_draw( g_pPreviewWidget );
+#else
 		gtk_widget_draw( g_pPreviewWidget, NULL );
+#endif
 	}
 }
 

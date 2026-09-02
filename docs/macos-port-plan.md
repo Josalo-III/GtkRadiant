@@ -276,18 +276,6 @@ not an overwrite of the existing game directory.
 
 ## Prospective roadmap
 
-### Phase 4: `GtkGLArea` runtime integration
-
-- Implement and verify context sharing for every editor view and plugin that
-  exchanges OpenGL resources.
-- Verify realize, render, resize, unrealize, teardown, and repeated window
-  lifecycle behavior.
-- Reduce or isolate direct GLX use so context ownership remains with GDK.
-- Validate camera, orthographic, texture, text, patch, and plugin rendering.
-
-Exit criterion: all primary editor views render correctly and repeatedly under
-XQuartz without context, framebuffer, or resource-sharing errors.
-
 ### Phase 5: Production-map correctness and performance
 
 - Open each staged fixture without saving.
@@ -361,12 +349,10 @@ are again actively maintainable.
 
 ### Immediate next checkpoint
 
-The initial interaction and representative sample-map gates now pass. Re-test
-selection and an in-widget drag with an existing brush selected, resize the
-views, and perform several clean start/quit cycles. Then open the staged
-medium recovery fixture without saving and record its load time and interaction
-behavior. Do not edit a recovery source in place; any save test uses a new
-candidate path and is compared structurally before it is reopened.
+Phase 4 is complete. Start Phase 5 by opening the staged medium recovery
+fixture, recording its first-load time and normal edit responsiveness, then
+performing the first deliberate save-round-trip to a named candidate path.
+Profile first-load texture latency before altering the legacy texture path.
 
 ## Implementation journal
 
@@ -778,9 +764,12 @@ display was partly expected because that runtime file had not yet been staged.
 
 This is the first working-editor milestone, not the Phase 4 exit criterion.
 Repeated startup/shutdown, resize, redraw, real map loading, texture resource
-sharing, and the GtkGenSurf and TexTool plugin GL views remain to be tested.
-Those two plugins still use GTK2 `expose-event` handlers for their previews and
-need the same reviewed GTK3 render-lifecycle treatment before Phase 4 closes.
+sharing, and the GtkGenSurf and TexTool plugin GL views were identified as
+remaining work.
+TexTool already receives GTK3 `render` callbacks through Radiant's shared
+`IWindow` wrapper, so it needs runtime validation rather than a duplicate
+widget conversion. GtkGenSurf owns a separate legacy preview implementation
+and is addressed in the later plugin-lifecycle checkpoint.
 
 #### Copied-fixture interaction and runtime-data follow-up
 
@@ -843,6 +832,100 @@ shader/texture lookup, viewport drawing, and navigation together. It is still
 not a production-map round-trip: selection, resize, repeated lifecycle tests,
 the GL-preview plugins, and the staged medium and stress maps remain Phase 4
 and Phase 5 work.
+
+The full Themepark source also opens in the editor. This is the recovery map's
+6,493-brush, 467-patch load path, so it is a major entry milestone; it does
+not authorize an in-place save or mean that performance and editing behavior
+are complete. The current GTK3 layout's pane dividers were difficult or
+impossible to resize interactively. The layout is built from normal
+`GtkPaned` widgets and already persists their positions. Each GTK3 pane now
+receives GTK's `wide-handle` affordance, while GTK2 is unchanged. This makes
+the hit targets visible and larger without changing pane ownership or the
+existing saved-position format. After restart the pane dividers drag-resized
+correctly, validating that targeted usability correction.
+
+Initial texture display remains noticeably slow. This is not Rosetta: the
+editor is a native arm64 Mach-O executable and the live contexts report the
+Apple M1 Max renderer. The legacy texture path decodes images on the UI thread,
+constructs every mip level in CPU code, and synchronously uploads each level
+with `glTexImage2D`; under XQuartz each upload also crosses the X11/Apple
+compatibility boundary. Those facts make texture upload a plausible bottleneck,
+but no optimization has been made on that inference. A sampled profile and
+repeatable first-versus-warm load measurement are required before changing
+texture filtering, mip generation, caching, or upload behavior.
+
+The first measurement is now available for `q3dm1sample.map`: 11.49 seconds
+for the initial load and 1.81 seconds for the immediate reload. The 9.68-second
+reduction (a 6.3× cold-to-warm ratio) shows that most of the reported delay is
+one-time resource initialization or caching rather than a persistent emulation
+penalty. The still-visible warm-load cost includes map parsing and rendering as
+well as any texture work, so it must not yet be attributed to a single layer.
+The next profile must partition the cold interval among VFS reads/image decode,
+CPU mip generation, and OpenGL upload.
+
+A subsequent `q3dm1sample` load measured 10.58 seconds. On that run, selecting
+an existing brush, moving it, and undoing the move worked; camera free-look was
+nominal; wireframe, texture, and orthographic views navigated correctly; and
+assigning a visible texture to a selected face worked. GtkGenSurf opened and
+rendered its preview after the queued-render conversion, which validates that
+plugin path. The actual plugin-menu label is lower-case `textool`, not the
+source module's `Q3 Texture Tools` display name.
+
+#### Remaining interaction and preview paths
+
+The regular editor panes, a sample map, and Themepark have already exercised
+the main shared `GtkGLArea` views. The remaining normal-input test is a
+selected existing brush dragged inside its viewport, followed by a clean
+restart/quit cycle. Camera free-move is deliberately separate: it uses a real
+pointer capture to hide and confine the cursor, unlike the ordinary in-widget
+drag path that was stabilized by removing a global legacy grab. It must be
+entered and exited normally, including a focus change, before its capture code
+is changed.
+
+GtkGenSurf is different: it creates its own GL widget and still connected the
+GTK2 `expose-event` signal. GTK3 has now been given a bounded conversion: it
+connects to `render`, queues preview updates rather than drawing from arbitrary
+callbacks, and redraws its live coordinate readout through that lifecycle.
+GTK2 retains the original expose, scissor, and buffer-swap behavior. The native
+arm64 module builds successfully, and opening its preview now renders under
+GTK3. The remaining non-destructive checks are changing a control, resizing the
+preview, and closing it without generating map geometry.
+
+TexTool was investigated only long enough to classify it. Its live window is
+supplied through Radiant's `IWindow` interface. GTK3 needed a `GtkGLArea`
+`render` callback, child-before-show construction, the area-specific render
+queue, and a per-paint viewport refresh; after those changes a selected
+Themepark patch rendered its 3-by-3 green control-point grid. This verified
+the wrapper's basic lifecycle. The texture background was flat white, however,
+and GTK3 exposes no public equivalent to GtkGLExt's arbitrary per-widget
+shared-context constructor.
+
+Git history makes this an intentionally deferred legacy-tool issue rather
+than a Mac recovery blocker. `origin/main` last changed TexTool substantively
+in 2015 (`2f403e16`); its only later touch was the 2017 `abs` to `fabs` warning
+fix (`5f7efeec`). The historical `origin/gtk3` branch likewise retained the
+old GtkGLExt sharing assumption. Since TexTool is not part of the intended
+mapping workflow, it is removed from the Phase 4 gate. Revisit texture sharing
+only if a real TexTool use case emerges, at which point it warrants a scoped
+design rather than another compatibility patch.
+
+#### Phase 4 completion
+
+Phase 4 is complete as of 2026-09-02 for the recovered Quake III mapping
+workflow. The primary GTK3 `GtkGLArea` views create native Apple M1 Max legacy
+contexts, share the editor's texture resources, render repeatedly under
+XQuartz, and survive map loads, resizing, ordinary editing, undo, free-look,
+and restart cycles without a further context or framebuffer error. The sample
+map and the 6,493-brush/467-patch Themepark map both open with visible
+textures; a brush move and undo work; pane dividers resize; and a test map
+saves successfully. GtkGenSurf's preview opens and renders through the GTK3
+render lifecycle. Its advanced generator controls remain a Phase 5 use-case
+test rather than a platform gate.
+
+The closure deliberately excludes TexTool's unmaintained arbitrary texture
+sharing and does not claim performance, map round-trip, compiler, or gameplay
+correctness. Those are the defined work of Phase 5, not reasons to keep
+reopening the GTK3 runtime port.
 
 ### Recovered Windows 7 environment audit
 

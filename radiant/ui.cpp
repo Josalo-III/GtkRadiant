@@ -101,14 +101,25 @@ static gint close_widget( GtkWidget *widget, GdkEvent* event, gpointer data ){
 }
 
 void CGtkWindow::DoExpose(){
-	gtk_glwidget_make_current( m_pGLWidget );
+	if ( !gtk_glwidget_make_current( m_pGLWidget ) ) {
+		Sys_FPrintf( SYS_ERR, "ERROR: plugin GL window could not activate its context\n" );
+		return;
+	}
 	if ( m_pListen->Paint() ) {
 		gtk_glwidget_swap_buffers( m_pGLWidget );
 	}
 }
 
 void CGtkWindow::Redraw(){
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	// GtkGLArea has its own render scheduling path.  Using the generic GTK
+	// draw queue can repaint the widget chrome without emitting "render" for
+	// a legacy plug-in window, leaving its last (or initial) framebuffer
+	// visible after a resize.
+	gtk_gl_area_queue_render( GTK_GL_AREA( m_pGLWidget ) );
+#else
 	gtk_widget_queue_draw( m_pGLWidget );
+#endif
 }
 
 void CGtkWindow::Close(){
@@ -133,7 +144,6 @@ bool CGtkWindow::Show(){
 	m_pWnd = gtk_window_new( GTK_WINDOW_TOPLEVEL );
 	gtk_window_set_title( GTK_WINDOW( m_pWnd ), m_Name.GetBuffer() );
 	gtk_window_set_default_size( GTK_WINDOW( m_pWnd ), m_nWidthParam, m_nHeightParam );
-	gtk_widget_show( m_pWnd );
 
 	// GL widget creation
 	m_pGLWidget = gtk_glwidget_new( FALSE, g_qeglobals_gui.d_glBase );
@@ -158,8 +168,16 @@ bool CGtkWindow::Show(){
 	g_signal_connect( G_OBJECT( m_pWnd ), "key-press-event",
 						G_CALLBACK( keypress ), m_pListen );
 
-	gtk_widget_show( m_pGLWidget );
+	// A GtkGLArea must be parented before it is shown.  Showing an unparented
+	// child happened to work with GtkGLExt, but GTK3 can leave it without a
+	// realized render lifecycle, producing a blank plugin window.
 	gtk_container_add( GTK_CONTAINER( m_pWnd ), m_pGLWidget );
+	gtk_widget_show( m_pGLWidget );
+	gtk_widget_show( m_pWnd );
+	// GtkGLArea may emit its first automatic render while the toplevel is
+	// being mapped.  Queue a post-map render so an IWindow client such as
+	// TexTool always paints its initialized contents into the visible buffer.
+	Redraw();
 
 	return true;
 }

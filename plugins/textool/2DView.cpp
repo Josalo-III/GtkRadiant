@@ -38,11 +38,24 @@ static void view_ZoomOut( GtkWidget* widget, gpointer data ){
 }
 
 void C2DView::PreparePaint(){
-	g_QglTable.m_pfn_qglClearColor( 0, 0, 0, 0 );
+	// GtkGLArea gives each render callback its own framebuffer.  The old
+	// GtkGLExt path inherited a previously cleared back buffer, whereas an
+	// uncleared transparent area can appear as a blank native GTK3 window.
+	g_QglTable.m_pfn_qglClearColor( 0, 0, 0, 1 );
 	g_QglTable.m_pfn_qglViewport( 0, 0, m_rect.right, m_rect.bottom );
+	// TexTool predates GtkGLArea and assumes a fresh fixed-function context.
+	// Establish every state that could hide its two-dimensional primitives.
+	g_QglTable.m_pfn_qglDisable( GL_BLEND );
+	g_QglTable.m_pfn_qglDisable( GL_CULL_FACE );
+	g_QglTable.m_pfn_qglDisable( GL_DEPTH_TEST );
+	g_QglTable.m_pfn_qglDisable( GL_SCISSOR_TEST );
+	g_QglTable.m_pfn_qglDepthMask( GL_TRUE );
+	g_QglTable.m_pfn_qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 	g_QglTable.m_pfn_qglMatrixMode( GL_PROJECTION );
 	g_QglTable.m_pfn_qglLoadIdentity();
 	g_QglTable.m_pfn_qglOrtho( m_Mins[0], m_Maxs[0], m_Maxs[1], m_Mins[1], -1, 1 );
+	g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
+	g_QglTable.m_pfn_qglLoadIdentity();
 }
 
 void C2DView::SpaceForWindow( float c[2], int x, int y ){

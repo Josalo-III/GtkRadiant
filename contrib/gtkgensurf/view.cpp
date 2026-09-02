@@ -42,6 +42,10 @@ static RECT rcGrid;    // rectangle within rcLower that forms the border of the 
                        //   a 3 pixel slop.
 static RECT rcLower;   // lower half of window, where plan view is drawn
 static RECT rcUpper;   // upper half or entire window, where isometric projection is drawn
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+static POINT preview_cursor;
+static bool preview_cursor_valid = false;
+#endif
 
 void vertex_selected();
 void texfont_init();
@@ -158,29 +162,62 @@ static void draw_preview(){
 		rcGrid.bottom = Y0G - 3;
 		rcGrid.right  = X0G + (int)( SFG * ( Hur - Hll ) ) + 3;
 		rcGrid.top    = Y0G + (int)( SFG * ( Vur - Vll ) ) + 3;
+
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+		if ( preview_cursor_valid && PtInRect( &rcGrid, preview_cursor ) ) {
+			char text[32];
+			int x = (int)( Hll + ( preview_cursor.x - X0G ) / SFG );
+			int y = (int)( Vur - ( preview_cursor.y - Y0G ) / SFG );
+
+			switch ( Plane )
+			{
+			case PLANE_XZ0:
+			case PLANE_XZ1:
+				snprintf( text, sizeof( text ), " x=%d, z=%d   ", (int)( floor( x - 0.5 ) + 1. ), (int)( floor( y - 0.5 ) + 1. ) );
+				break;
+			case PLANE_YZ0:
+			case PLANE_YZ1:
+				snprintf( text, sizeof( text ), " y=%d, z=%d   ", (int)( floor( x - 0.5 ) + 1. ), (int)( floor( y - 0.5 ) + 1. ) );
+				break;
+			default:
+				snprintf( text, sizeof( text ), " x=%d, y=%d   ", (int)( floor( x - 0.5 ) + 1. ), (int)( floor( y - 0.5 ) + 1. ) );
+			}
+			texfont_write( text, rcCoord.left, rcCoord.top );
+		}
+#endif
 	}
 	else{
 		DrawPreview( rcUpper );
 	}
 }
 
+static void render_preview(){
+	if ( !g_UIGtkTable.m_pfn_glwidget_make_current( g_pPreviewWidget ) ) {
+		g_FuncTable.m_pfnSysPrintf( "GtkGenSurf: glMakeCurrent failed\n" );
+		return;
+	}
+
+	draw_preview();
+	g_GLTable.m_pfn_QE_CheckOpenGLForErrors();
+}
+
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+static gboolean render( GtkGLArea *widget, GdkGLContext *context, gpointer data ){
+	render_preview();
+	return TRUE;
+}
+#else
 static gint expose( GtkWidget *widget, GdkEventExpose *event, gpointer data ){
 	if ( event->count > 0 ) {
 		return TRUE;
 	}
 
-	if ( !g_UIGtkTable.m_pfn_glwidget_make_current( g_pPreviewWidget ) ) {
-		g_FuncTable.m_pfnSysPrintf( "GtkGenSurf: glMakeCurrent failed\n" );
-		return TRUE;
-	}
-
-	draw_preview();
-
+	render_preview();
 	g_UIGtkTable.m_pfn_glwidget_swap_buffers( g_pPreviewWidget );
-	g_GLTable.m_pfn_QE_CheckOpenGLForErrors();
 
 	return TRUE;
 }
+#endif
 
 static void button_press( GtkWidget *widget, GdkEventButton *event, gpointer data ){
 	POINT pt = { (long)event->x, gtkutil_widget_get_height( widget ) - (long)event->y };
@@ -298,6 +335,10 @@ static void motion( GtkWidget *widget, GdkEventMotion *event, gpointer data ){
 		return;
 	}
 
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	preview_cursor = pt;
+	preview_cursor_valid = true;
+#else
 	if ( !g_UIGtkTable.m_pfn_glwidget_make_current( g_pPreviewWidget ) ) {
 		g_FuncTable.m_pfnSysPrintf( "GtkGenSurf: glMakeCurrent failed\n" );
 		return;
@@ -307,6 +348,7 @@ static void motion( GtkWidget *widget, GdkEventMotion *event, gpointer data ){
 	g_GLTable.m_pfn_qglScissor( rcCoord.left, rcCoord.bottom, rcCoord.right - rcCoord.left,
 								rcCoord.top - rcCoord.bottom );
 	g_GLTable.m_pfn_qglClear( GL_COLOR_BUFFER_BIT );
+#endif
 
 	if ( PtInRect( &rcGrid,pt ) ) {
 		GdkWindow *window;
@@ -324,6 +366,7 @@ static void motion( GtkWidget *widget, GdkEventMotion *event, gpointer data ){
 		gdk_cursor_unref( cursor );
 #endif
 
+		#if !GTK_CHECK_VERSION( 3, 0, 0 )
 		char Text[32];
 		int x, y;
 
@@ -344,15 +387,23 @@ static void motion( GtkWidget *widget, GdkEventMotion *event, gpointer data ){
 		}
 
 		texfont_write( Text, rcCoord.left, rcCoord.top );
+		#endif
 	}
 	else
 	{
 		gdk_window_set_cursor( gtk_widget_get_window( g_pWndPreview ), NULL );
 	}
 
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	// GtkGLArea owns presentation and only permits drawing during "render".
+	// Redraw the cursor readout through that lifecycle rather than modifying
+	// the framebuffer directly from this input event.
+	gtk_widget_queue_draw( g_pPreviewWidget );
+#else
 	g_UIGtkTable.m_pfn_glwidget_swap_buffers( g_pPreviewWidget );
 	g_GLTable.m_pfn_QE_CheckOpenGLForErrors();
 	g_GLTable.m_pfn_qglDisable( GL_SCISSOR_TEST );
+#endif
 }
 
 static gint preview_close( GtkWidget *widget, gpointer data ){
@@ -441,7 +492,11 @@ void CreateViewWindow(){
 	g_pPreviewWidget = g_UIGtkTable.m_pfn_glwidget_new( FALSE, NULL );
 
 	gtk_widget_set_events( g_pPreviewWidget, GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "render", G_CALLBACK( render ), NULL );
+#else
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "expose-event", G_CALLBACK( expose ), NULL );
+#endif
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "motion-notify-event", G_CALLBACK( motion ), NULL );
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "button-press-event",
 						G_CALLBACK( button_press ), NULL );
