@@ -949,6 +949,16 @@ the skyfix recipe, while classifying `q3dm1sample` as an editing/rendering
 fixture rather than the sealed full-pipeline test map. A future compile gate
 needs either a sealed fixture or a deliberate leak repair in a recovery map.
 
+That repair was immediately made in the staged `q3dm7sample` map. Its updated
+recipe completed BSP, VIS, and light. Radiant did not retain the child
+compiler's scrollback in `radiant.log`, so its elapsed wall time is unavailable,
+but the generated 4,647,072-byte BSP verifies every output stage: Q3Map2's
+read-only `-info` report lists 4,045 drawsurfaces, 29,990 draw vertices,
+visibility data, 16 lightmaps, and a 32,200-entry lightgrid. This is the first
+complete native-arm64 Q3Map2 pipeline result for the recovered workflow. The
+next Phase 5 gate is to load that BSP in ioquake3 and inspect it, especially
+the sky edges and the repaired leak area.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
