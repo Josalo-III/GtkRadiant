@@ -376,13 +376,13 @@ rejected without changing zsh or bash options.
 `apple/stage-recovery.py` stages three tiers of map fixtures, extracts only the
 Q3Pack subtree from the external Radiant ZIP, and writes a JSON manifest. Its
 destination is restricted to this repository or a system temporary directory.
-The current ignored workspace is `.macos-work/phase0/`:
+The current ignored workspace is `macos-work/phase0/`:
 
 ```sh
 apple/macos-env.sh /usr/bin/python3 apple/stage-recovery.py stage \
   --backup-root "/Users/josephburns/Documents/Q3A Mapping" \
   --gamepack-archive "/Users/josephburns/Documents/Q3A Mapping/Sources/GtkRadiant-1.6.7-20230820.zip" \
-  --destination "$PWD/.macos-work/phase0" \
+  --destination "$PWD/macos-work/phase0" \
   --fixture "small=/Users/josephburns/Documents/Q3A Mapping/map authoring files/2019/6-04-19-1.map" \
   --fixture "medium=/Users/josephburns/Documents/Q3A Mapping/map authoring files/Sul-Dov_05-27-22-01.map" \
   --fixture "stress=/Users/josephburns/Documents/Q3A Mapping/map authoring files/themepark-06-03-22-1.map"
@@ -400,8 +400,8 @@ SHA-256 digests, and structural counts. A saved candidate can be checked with:
 
 ```sh
 apple/macos-env.sh /usr/bin/python3 apple/stage-recovery.py compare \
-  --baseline .macos-work/phase0/fixtures/baseline/stress.map \
-  --candidate .macos-work/phase0/fixtures/work/stress.map
+  --baseline macos-work/phase0/fixtures/baseline/stress.map \
+  --candidate macos-work/phase0/fixtures/work/stress.map
 ```
 
 Structural equality is the first round-trip gate, not proof of semantic
@@ -475,7 +475,7 @@ The test-only VFS overlay is prepared with:
 
 ```sh
 apple/macos-env.sh /usr/bin/python3 apple/stage-recovery.py prepare-vfs \
-  --workspace "$PWD/.macos-work/phase0" \
+  --workspace "$PWD/macos-work/phase0" \
   --quake-base "/Applications/Quake 3 Arena"
 ```
 
@@ -708,10 +708,16 @@ rendering evidence before loading a recovery map.
 
 An isolated Mac translation of the recovered Windows `user2.proj` now starts
 the main editor. Its base, map, texture, entity, autosave, and compiler paths
-all point into `.macos-work/runtime/game-root`; the verified retail paks remain
+all point into `macos-work/runtime/game-root`; the verified retail paks remain
 read-only symlinks to `/Applications/Quake 3 Arena/baseq3`. Its q3map2 menu
 entries invoke the native tool in `install/`. The original backup, installed
 game data, Windows SSD, and normal user preferences remain untouched.
+
+The workspace is deliberately untracked but not hidden. A dot-directory caused
+Finder and ordinary repository searches to omit the active maps and compiled
+BSPs, undermining the isolation it was intended to provide. The live data now
+lives in visible `macos-work/`; `.macos-work` is only a compatibility symlink
+for paths recorded before the relocation.
 
 The first editor screenshot established that the GTK shell, menus, toolbars,
 splitters, status bar, shader-directory list, and project loading all work.
