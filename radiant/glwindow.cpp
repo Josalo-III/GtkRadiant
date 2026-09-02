@@ -79,9 +79,11 @@ static void button_press( GtkWidget *widget, GdkEventButton *event, gpointer dat
 	GLWindow *wnd = (GLWindow*)data;
 	guint32 flags = 0;
 
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 	gdk_pointer_grab( gtk_widget_get_window( widget ), FALSE,
 					  (GdkEventMask)( GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK ),
 					  NULL, NULL, GDK_CURRENT_TIME );
+#endif
 
 	gtk_window_set_focus( GTK_WINDOW( g_pParentWnd->m_pWidget ), widget );
 
@@ -124,7 +126,9 @@ static void button_release( GtkWidget *widget, GdkEventButton *event, gpointer d
 	GLWindow *wnd = (GLWindow*)data;
 	guint32 flags = 0;
 
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 	gdk_pointer_ungrab( GDK_CURRENT_TIME );
+#endif
 
 	if ( ( event->state & GDK_CONTROL_MASK ) != 0 ) {
 		flags |= MK_CONTROL;

@@ -3878,7 +3878,9 @@ void MainFrame::CreateQEChildren(){
 
 		r = g_PrefsDlg.m_strLastProject.GetBuffer();
 
-		while ( r == NULL || *r == '\0' || access( r, R_OK ) != 0 || !QE_LoadProject( r ) || templateVersion != IntForKey( g_qeglobals.d_project_entity, "template_version" ) )
+		while ( r == NULL || *r == '\0' || access( r, R_OK ) != 0 || !QE_LoadProject( r )
+				|| ( !IntForKey( g_qeglobals.d_project_entity, "user_project" )
+					 && templateVersion != IntForKey( g_qeglobals.d_project_entity, "template_version" ) ) )
 		{
 			if ( !bTriedTemplate ) {
 				// try default project location

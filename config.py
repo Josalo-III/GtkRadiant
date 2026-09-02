@@ -242,6 +242,16 @@ class Config:
                 module = SConscript( os.path.join( build_dir, 'SConscript.module' ) )
                 Default( InstallAs( os.path.join( self.install_directory, 'modules/%s.so' % libname ), module ) )
 
+            # BobToolz loads these lists beside its module at first use.  They
+            # are editor runtime data, not Windows setup payload, so a normal
+            # radiant build must install them on every platform.
+            for filename in [ 'bt-el1.txt', 'bt-el2.txt', 'ctf-blue.txt', 'ctf-red.txt',
+                              'door-tex-trim.txt', 'door-tex.txt', 'tp_ent.txt' ]:
+                Default( InstallAs(
+                    os.path.join( self.install_directory, 'modules', 'bt', filename ),
+                    os.path.join( 'contrib', 'bobtoolz', 'bt', filename )
+                ) )
+
     def emit_q3map2( self, urt = False ):
         if ( urt ):
             compiler_name = 'q3map2_urt'

@@ -31,8 +31,8 @@ editor.
 The original Mac releases of Quake III Arena and its mapping tools arrived late
 and were difficult to run reliably. Early mapping work was possible on a Mac,
 but increasingly complex maps eventually required moving development to a
-Windows 7 installation. That environment is currently on an offsite SSD, while
-the map sources and assets are available in redundant local backups.
+Windows 7 installation. That SSD has now been recovered and mounted read-only;
+the map sources and assets also remain available in redundant local backups.
 
 This history sets a higher bar than basic platform compatibility. The port must
 be evaluated against the real projects that the editor is intended to recover.
@@ -278,9 +278,6 @@ not an overwrite of the existing game directory.
 
 ### Phase 4: `GtkGLArea` runtime integration
 
-- Drive the isolated first-run game selection into the main editor.
-- Capture explicit OpenGL version, profile, context-creation, and error
-  diagnostics.
 - Implement and verify context sharing for every editor view and plugin that
   exchanges OpenGL resources.
 - Verify realize, render, resize, unrealize, teardown, and repeated window
@@ -364,9 +361,12 @@ are again actively maintainable.
 
 ### Immediate next checkpoint
 
-Enter the main editor through the disposable XQuartz launch environment and
-record explicit OpenGL context/version/sharing diagnostics before opening any
-recovery map.
+The initial interaction and representative sample-map gates now pass. Re-test
+selection and an in-widget drag with an existing brush selected, resize the
+views, and perform several clean start/quit cycles. Then open the staged
+medium recovery fixture without saving and record its load time and interaction
+behavior. Do not edit a recovery source in place; any save test uses a new
+candidate path and is compared structurally before it is reopened.
 
 ## Implementation journal
 
@@ -693,7 +693,9 @@ outside macOS and easy to review upstream:
   GtkGLExt's arbitrary shared-context constructor; Phase 4 therefore treats
   sharing as a runtime design and validation problem.
 
-### Phase 4 — initial XQuartz runtime probe
+### Phase 4 — XQuartz runtime integration
+
+#### Initial game-selection probe
 
 The first GTK3 binary was launched through `apple/macos-env.sh` with a
 repository-local disposable home and generated game description. The game
@@ -712,7 +714,239 @@ this checkpoint.
 
 This proves GTK initialization, game discovery, and first-run dialog creation;
 it does not prove `GtkGLArea` context creation because the editor view was not
-entered. The probe was terminated after identifying that boundary. The next
-runtime test must drive the isolated game selection into the main editor and
-capture explicit context/version/sharing diagnostics before loading a recovery
-map.
+entered. The probe was terminated after identifying that boundary; the next
+checkpoint below crossed it with explicit context, version, sharing, and
+rendering evidence before loading a recovery map.
+
+#### First editor entry and rendered views
+
+An isolated Mac translation of the recovered Windows `user2.proj` now starts
+the main editor. Its base, map, texture, entity, autosave, and compiler paths
+all point into `.macos-work/runtime/game-root`; the verified retail paks remain
+read-only symlinks to `/Applications/Quake 3 Arena/baseq3`. Its q3map2 menu
+entries invoke the native tool in `install/`. The original backup, installed
+game data, Windows SSD, and normal user preferences remain untouched.
+
+The first editor screenshot established that the GTK shell, menus, toolbars,
+splitters, status bar, shader-directory list, and project loading all work.
+The initial unsynchronized GL run showed white panes and one
+`GL_INVALID_OPERATION`, so that image was treated as entry evidence rather
+than a rendering success.
+
+The Mac launcher now sets `GDK_GL=legacy` inside its child environment. This is
+not an ambient shell setting and does not affect other applications. It is
+required because Radiant's renderer still uses the fixed-function API; without
+it, GDK attempts a modern core context that cannot execute that renderer.
+Runtime diagnostics confirm four GtkGLAreas using desktop OpenGL 2.1, not ES:
+
+- vendor: `Apple`;
+- renderer: `Apple M1 Max`;
+- version: `2.1 Metal - 89.4`;
+- legacy context: yes; and
+- one common GDK shared-context group for the camera, orthographic, texture,
+  and auxiliary views.
+
+GTK warns when Radiant requests 2.1 because its normal version-selection API
+expects at least 3.2 on macOS. That warning describes the request path, not the
+result: the explicit legacy mode subsequently supplies and reports the needed
+2.1 context.
+
+The first ordinary run later failed in XQuartz with `GLXBadContext` after
+`xp_attach_gl_context returned: 2`. A synchronous X11 debugger run exposed the
+cause and, importantly, rendered the orthographic grid, origin/entity markers,
+and texture-browser `notex` tile without the earlier OpenGL error. This proved
+that the fixed-function renderer and GtkGLArea framebuffer can work together;
+the failure was in context transitions rather than map drawing or a required
+core-profile rewrite.
+
+The transition storm came from preserving a GtkGLExt-era invariant too
+literally. GTK has already made a GtkGLArea context current before emitting
+`render`, but each legacy `OnExpose()` immediately called `MakeCurrent()`
+again. Under XQuartz's GLX-to-CGL bridge, four views repeatedly detached and
+reattached contexts and drawables. The GTK3 wrapper now compares the requested
+context with GDK's current context and skips only that redundant transition.
+It still makes a context current for realize callbacks, timers, plugin calls,
+and any other caller that genuinely needs a change. This is a shared GTK3
+lifecycle correction rather than an Apple-only rendering branch.
+
+After rebuilding, a normal non-debugger launch created all four Apple 2.1
+contexts, mapped the `unnamed.map` editor window, stayed alive beyond the
+original failure interval, and emitted neither `GLXBadContext` nor a new
+OpenGL error. The generated 40-entry Phase 1 shader list has also been copied
+into the ignored runtime game root for the next restart; the prior `notex`
+display was partly expected because that runtime file had not yet been staged.
+
+This is the first working-editor milestone, not the Phase 4 exit criterion.
+Repeated startup/shutdown, resize, redraw, real map loading, texture resource
+sharing, and the GtkGenSurf and TexTool plugin GL views remain to be tested.
+Those two plugins still use GTK2 `expose-event` handlers for their previews and
+need the same reviewed GTK3 render-lifecycle treatment before Phase 4 closes.
+
+#### Copied-fixture interaction and runtime-data follow-up
+
+The isolated runtime VFS initially used the installed game directory as its
+loose-file root. The translated project's `basepath` was corrected to the
+parent game root, and the generated game description's `enginepath` was then
+pointed at that same disposable root. The root contains symlinks to the
+verified retail paks, so this adds writable staged data without copying or
+altering the installed Quake III directory. The VFS now reads the generated
+40-entry shader list and the staged entity definitions. On the small copied
+fixture, `textures/common/nodraw` and `textures/outrage/myglass` resolve where
+they previously fell back to `shadernotex`.
+
+The command-line map argument also uncovered a general project-loading bug.
+Radiant treated a project marked `user_project=1` as if it had to match an
+installed `default_project.proj` template. That is wrong for user-authored
+projects, particularly recovered ones that intentionally live outside the
+game installation. The shared project loader now bypasses only the template
+comparison for explicit user projects; it continues to validate ordinary
+template-derived projects. The isolated preference records project version 2,
+so opening a `.map` at launch reuses the recovered project without a file
+chooser.
+
+The small fixture loaded as one brush and zero entities in 0.04 seconds. The
+editor rendered and accepted repeated scrolling, while its copied source stayed
+byte-identical to the protected baseline. A canvas click then initialized
+BobToolz and reported missing `install/modules/bt/bt-el1.txt` and `bt-el2.txt`.
+These are shipped BobToolz exclusion-list defaults, not user map data. They
+were previously copied only by the old setup path, which the deliberately
+minimal `--no-packs target=radiant` development build does not run. The normal
+`radiant` target now installs all seven BobToolz `bt/` support files beside the
+module on every platform, and the macOS build has verified their presence.
+
+The first click after that correction still froze the editor. Sampling showed
+both Radiant and XQuartz idle rather than consuming CPU, which made a renderer
+loop unlikely but did not prove the source of the stalled interaction. The
+remaining shared GTK2 input path called the deprecated global
+`gdk_pointer_grab()`/`gdk_pointer_ungrab()` pair for every canvas click. That
+is unnecessary for an ordinary in-widget GTK3 drag and is a poor fit for
+XQuartz's event routing. GTK3 therefore leaves that legacy global grab out of
+the normal press/release path; the GTK2 behavior is retained unchanged. This
+is deliberately a narrow stabilization step: the distinct camera free-move
+capture path still needs its own modern review before it can be declared
+complete.
+
+With the change and the BobToolz data installed, a fresh launch accepted a
+canvas interaction, remained responsive, and saved a map to
+`/Users/josephburns/gtk3.map`. The saved file is syntactically well-formed. It
+contains the original one brush plus one newly created six-face brush using
+`curry/curry_lightmap`; its structural counts are consequently two brushes and
+twelve faces rather than the source fixture's one and six. The different count
+is the expected result of the interactive edit, not evidence of an incomplete
+save. Radiant also normalizes entity-key and face order when it writes the map,
+so byte equality is intentionally not required for an edited candidate.
+
+The next real editor-map probe opened `q3dm1sample.map` successfully. Its
+textures were visible and camera navigation worked. This is stronger evidence
+than the tiny one-brush fixture because it crosses ordinary map loading,
+shader/texture lookup, viewport drawing, and navigation together. It is still
+not a production-map round-trip: selection, resize, repeated lifecycle tests,
+the GL-preview plugins, and the staged medium and stress maps remain Phase 4
+and Phase 5 work.
+
+### Recovered Windows 7 environment audit
+
+The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
+macOS reports the NTFS volume as read-only; the audit performed no writes to it.
+This gives the recovery work a second kind of evidence: the local backup remains
+the protected source corpus, while the SSD records the installation layout and
+editor configuration that were actually used.
+
+The relevant preserved locations are:
+
+- `/Volumes/Windows7/Users/Joseph Burns/Desktop/outrage/` — working assets,
+  archives, packaged output, and map-development history;
+- `/Volumes/Windows7/Program Files (x86)/ioquake3/baseq3/` — the live writable
+  game and authoring tree used by Radiant;
+- `/Volumes/Windows7/Program Files/GtkRadiant-1.6.6-20180422/` — GtkRadiant,
+  its Q3Pack, preferences, modules, and compiler tools; and
+- `/Volumes/Windows7/Program Files (x86)/Quake Toolkit/` — an independent
+  legacy Windows helper application.
+
+#### Authoritative editor state
+
+The active per-game preference file is
+`GtkRadiant-1.6.6-20180422/installs/Q3Pack/game/local.pref`. It records
+`user2.proj` as the last project and
+`baseq3/maps/themepark-06-03-22-1.map` as the last map. Its recent-file list and
+map timestamps place this state in June 2022.
+
+Another file at `GtkRadiant-1.6.6-20180422/q3.game/local.pref` points to a
+missing `user7.proj` and contains older window state. It is not the operative
+configuration. This distinction follows the Windows non-network preference
+path in the source: per-game preferences are stored in the installed game-tools
+directory, which is the Q3Pack `game/` subtree in this installation. The old
+`radiant.log` also names that Q3Pack preference location.
+
+The log itself records a 1.6.6 process compiled on 23 April 2018 and started on
+1 June 2019. That invocation exited after two seconds, before OpenGL became
+ready, so it must not be treated as evidence of a successful editor session.
+The 2022 preference state, named maps, compiled products, and packaging
+timestamps are stronger evidence of the later working environment.
+
+`user2.proj` preserves the authoring configuration that matters for recovery:
+
+- the correct `baseq3` map, texture, autosave, entity-definition, and base
+  paths;
+- separate q3map2 BSP, VIS, and lighting passes;
+- fast-test, full-test, and final compile recipes;
+- final lighting with `-fast -patchshadows -samples 3 -bounce 8 -dirty
+  -gamma 2 -compensate 4`;
+- BSPC AAS generation; and
+- ASE conversion using `-meta -patchmeta -subdivisions 4`.
+
+These recipes are behavioral requirements, not portable configuration files.
+The recovered project embeds Windows paths and executable names, so copying it
+into the Mac preference directory would create a misleading and fragile setup.
+The Mac recovery project should translate the known options onto isolated,
+writable macOS paths and native tools. An older `user6.proj` adds an
+experimental `-skyfix` final preset, but the 2022 preferences select
+`user2.proj`; preserve `-skyfix` as optional history rather than silently
+making it the baseline.
+
+#### Data and gamepack comparisons
+
+All nine official `pak0.pk3` through `pak8.pk3` files on the SSD are
+byte-identical, by SHA-256, to those in
+`/Applications/Quake 3 Arena/baseq3/`. The Windows installation therefore does
+not supply a different set of required retail data, and the Mac paks should not
+be replaced or duplicated.
+
+The recovered GtkRadiant Q3Pack `game/` tree is identical to the already staged
+1.6.7 Q3Pack except for its generated Windows `local.pref`. This independently
+validates the platform-neutral gamepack selected during Phase 0. The generated
+preference file remains user state and must not be imported as gamepack data.
+
+The SSD's latest named Themepark source,
+`baseq3/maps/themepark-06-03-22-1.map`, has SHA-256
+`b4c3fa01412dae7d882aaad6d07da020f07e97d21eb025c2dd390a7c85666c2f`.
+It is byte-identical to the primary stress fixture in the local backup. The
+preserved `autosave.map` is eleven minutes older and slightly smaller, so it
+does not contain later unnamed Themepark work.
+
+The recovered `outrage` desktop tree contains 552 `.map` files, 299 `.bak`
+files, 29 shader files, and 15 PK3s. Its packaged `outrage.pk3`, compiled
+`themepark.bsp`, and `themepark.aas` are dated 3 June 2022. The live Windows
+`baseq3/maps` directory contains 36 maps, 25 backups, 10 BSPs, 19 PRTs, and 22
+SRF files. These are useful provenance and runtime references, but testing must
+continue to use copied fixtures rather than edit either the SSD or the local
+backup.
+
+#### Historical tools versus recovery requirements
+
+The recovered Radiant editor and its bundled q3map2 are 32-bit x86 Windows
+executables; the installation also includes a separate 64-bit x86 q3map2, and
+the active preferences request that x64 compiler. Its adjacent GTK2 and
+GtkGLExt DLL closure corroborates the documented legacy Windows dependency
+model, but does not provide a source-reproducible GTK3 runtime.
+
+Quake Toolkit 1.57 is a 32-bit Windows-only helper with presets for old q3map
+and q3map2 versions. `ROJAN.q3p` likewise names GtkRadiant 1.6.5 and an external
+q3map2gui log path. Neither represents a dependency to port. They are historical
+evidence only; the later `user2.proj` compile recipes are the authoritative
+description of the desired workflow.
+
+The audit therefore narrows the next editor step: construct an isolated,
+writable Mac project from the semantics of `user2.proj`, reuse the verified Mac
+retail paks and staged Q3Pack, and enter the main editor without importing
+Windows-specific window state, ATI workarounds, paths, or GTK2 runtime files.

@@ -70,12 +70,66 @@ void WINAPI gtk_glwidget_swap_buffers( GtkWidget *widget ){
 
 gboolean WINAPI gtk_glwidget_make_current( GtkWidget *widget ){
 	GtkGLArea* area = GTK_GL_AREA( widget );
-	gtk_gl_area_make_current( area );
+	GdkGLContext* context = gtk_gl_area_get_context( area );
+
+	// GtkGLArea makes its context current before emitting "render".  The
+	// legacy GtkGLExt drawing path still calls MakeCurrent() from OnExpose(),
+	// and repeating that transition is particularly expensive (and unstable)
+	// in XQuartz's GLX-to-CGL bridge.  Keep the explicit transition for
+	// realize callbacks, timers and other callers that genuinely need it.
+	if ( context == NULL || gdk_gl_context_get_current() != context ) {
+		gtk_gl_area_make_current( area );
+		context = gtk_gl_area_get_context( area );
+	}
 
 	GError* error = gtk_gl_area_get_error( area );
 	if ( error != NULL ) {
 		Sys_FPrintf( SYS_ERR, "ERROR: GtkGLArea context: %s\n", error->message );
 		return FALSE;
+	}
+
+	if ( g_object_get_data( G_OBJECT( widget ), "radiant-context-diagnosed" ) == NULL ) {
+		GdkGLContext* requested_share_context = NULL;
+		GtkWidget* requested_share_widget = GTK_WIDGET(
+			g_object_get_data( G_OBJECT( widget ), "radiant-share-widget" )
+		);
+		if ( requested_share_widget != NULL
+			 && GTK_IS_GL_AREA( requested_share_widget )
+			 && gtk_widget_get_realized( requested_share_widget ) ) {
+			requested_share_context = gtk_gl_area_get_context( GTK_GL_AREA( requested_share_widget ) );
+		}
+
+		gint major = 0;
+		gint minor = 0;
+		gdk_gl_context_get_version( context, &major, &minor );
+
+		const GLubyte* vendor = qglGetString != NULL ? qglGetString( GL_VENDOR ) : NULL;
+		const GLubyte* renderer = qglGetString != NULL ? qglGetString( GL_RENDERER ) : NULL;
+		const GLubyte* version = qglGetString != NULL ? qglGetString( GL_VERSION ) : NULL;
+
+		char diagnostic[1024];
+		snprintf(
+			diagnostic,
+			sizeof( diagnostic ),
+			"GtkGLArea context: widget=%p context=%p requested-share-widget=%p "
+			"requested-share-context=%p actual-shared-context=%p version=%d.%d "
+			"legacy=%s es=%s vendor='%s' renderer='%s' GL='%s'\n",
+			widget,
+			context,
+			requested_share_widget,
+			requested_share_context,
+			gdk_gl_context_get_shared_context( context ),
+			major,
+			minor,
+			gdk_gl_context_is_legacy( context ) ? "yes" : "no",
+			gdk_gl_context_get_use_es( context ) ? "yes" : "no",
+			vendor != NULL ? reinterpret_cast<const char*>( vendor ) : "unavailable",
+			renderer != NULL ? reinterpret_cast<const char*>( renderer ) : "unavailable",
+			version != NULL ? reinterpret_cast<const char*>( version ) : "unavailable"
+		);
+		g_printerr( "%s", diagnostic );
+		Sys_Printf( "%s", diagnostic );
+		g_object_set_data( G_OBJECT( widget ), "radiant-context-diagnosed", GINT_TO_POINTER( 1 ) );
 	}
 
 	return TRUE;

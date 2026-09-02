@@ -21,6 +21,7 @@ deps_prefix=${GTKRADIANT_DEPS_PREFIX:-/opt/local}
 pkg_config="$deps_prefix/bin/pkg-config"
 isolated_path="$deps_prefix/bin:$deps_prefix/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 pkg_config_libdir="$deps_prefix/lib/pkgconfig:$deps_prefix/share/pkgconfig"
+gdk_gl=legacy
 
 usage() {
   echo "usage: apple/macos-env.sh --check" >&2
@@ -39,6 +40,7 @@ run_isolated() {
     PKG_CONFIG_LIBDIR="$pkg_config_libdir" \
     PYTHONNOUSERSITE=1 \
     GDK_BACKEND=x11 \
+    GDK_GL="$gdk_gl" \
     DISPLAY="${DISPLAY-}" \
     XAUTHORITY="${XAUTHORITY-}" \
     DEVELOPER_DIR="${DEVELOPER_DIR-/Applications/Xcode.app/Contents/Developer}" \
@@ -68,6 +70,7 @@ check_environment() {
   echo "PATH: $isolated_path"
   echo "PKG_CONFIG_LIBDIR: $pkg_config_libdir"
   echo "compiler target: $(run_isolated /usr/bin/clang -dumpmachine)"
+  echo "GDK OpenGL context mode: $gdk_gl"
 
   for package in gtk+-3.0 gdk-x11-3.0 gl glx x11 pangoft2 libxml-2.0 glib-2.0 libpng zlib; do
     if ! version=$(run_isolated "$pkg_config" --modversion "$package" 2>/dev/null); then
@@ -136,6 +139,7 @@ exec /usr/bin/env -i \
   PKG_CONFIG_LIBDIR="$pkg_config_libdir" \
   PYTHONNOUSERSITE=1 \
   GDK_BACKEND=x11 \
+  GDK_GL="$gdk_gl" \
   DISPLAY="${DISPLAY-}" \
   XAUTHORITY="${XAUTHORITY-}" \
   DEVELOPER_DIR="${DEVELOPER_DIR-/Applications/Xcode.app/Contents/Developer}" \
