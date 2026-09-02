@@ -1040,6 +1040,13 @@ and a fog-patch clipping warning. It reported zero degenerate edges and zero
 removed degenerate surfaces. The known `flame1side` missing-image warning is
 separate asset work.
 
+After the direct-run script and worker-stack repairs, the editor was retested
+through its normal menu commands: all compiler processes completed with status
+zero. Themepark AAS generation has occasional temporary pauses, but resumes and
+completes; the user reports the threaded compiler as a substantial speed
+improvement overall. Treat the AAS pauses as a future profiling observation,
+not a reason to disable the verified Q3Map2 VIS/light worker pool.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
