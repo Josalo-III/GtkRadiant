@@ -521,6 +521,9 @@ static void *ThreadWorkerEntry( void *arg ){
 void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 	pthread_mutexattr_t mattrib;
 	pthread_t work_threads[MAX_THREADS];
+#if defined( __APPLE__ )
+	pthread_attr_t thread_attr;
+#endif
 
 	int start, end;
 	int i = 0;
@@ -564,10 +567,24 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 #endif
 		recursive_mutex_init( mattrib );
 
+#if defined( __APPLE__ )
+		/* Recursive lightmap subdivision exceeds macOS's 512 KB pthread default.
+		   Eight 8 MB workers are modest on the supported 64 GB development host. */
+		if ( pthread_attr_init( &thread_attr ) != 0 ||
+			 pthread_attr_setstacksize( &thread_attr, 8 * 1024 * 1024 ) != 0 ) {
+			Error( "pthread worker stack setup failed" );
+		}
+#endif
+
 		for ( i = 0 ; i < numthreads ; i++ )
 		{
-			/* Default pthread attributes: joinable & non-realtime scheduling */
-			if ( pthread_create( &work_threads[i], NULL, ThreadWorkerEntry, (void*)(intptr_t)i ) != 0 ) {
+			if ( pthread_create( &work_threads[i],
+#if defined( __APPLE__ )
+							 &thread_attr,
+#else
+							 NULL,
+#endif
+							 ThreadWorkerEntry, (void*)(intptr_t)i ) != 0 ) {
 				Error( "pthread_create failed" );
 			}
 		}
@@ -577,6 +594,9 @@ void RunThreadsOn( int workcnt, qboolean showpacifier, void ( *func )( int ) ){
 				Error( "pthread_join failed" );
 			}
 		}
+#if defined( __APPLE__ )
+		pthread_attr_destroy( &thread_attr );
+#endif
 		pthread_mutexattr_destroy( &mattrib );
 		threaded = qfalse;
 	}

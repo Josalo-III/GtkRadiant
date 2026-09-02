@@ -1117,6 +1117,10 @@ void RunBsp( char *command ){
 	char cWork[BIG_PATH_MAX];
 	FILE  *hFile;
 	unsigned int i;
+	/* '#' is the project-file marker for the compiler's -connect option.  It
+	   makes monitoring an explicit capability of the selected recipe, rather
+	   than timing out for tools such as BSPC that cannot speak the protocol. */
+	const bool monitor = g_PrefsDlg.m_bWatchBSP && strchr( command, '#' ) != NULL;
 
 	SetInspectorMode( W_CONSOLE );
 
@@ -1139,19 +1143,30 @@ void RunBsp( char *command ){
 
 	QE_ExpandBspString( command, sys, cWork );
 
-	if ( g_PrefsDlg.m_bWatchBSP ) {
+	if ( monitor ) {
 		// grab the file name for engine running
 		char *bspname = new char[1024];
 		ExtractFileName( currentmap, bspname );
 		StripExtension( bspname );
 		g_pParentWnd->GetWatchBSP()->DoMonitoringLoop( sys, bspname );
 	} else {
-		// write all the steps in a single BAT / .sh file and run it, don't bother monitoring it
+		if ( g_PrefsDlg.m_bWatchBSP ) {
+			Sys_Printf( "BSP monitoring is unavailable for this recipe; running directly.\n" );
+		}
+		// Write all steps in one platform-native script and run it directly.
+#if defined( __linux__ ) || defined( __BSD__ ) || defined( __APPLE__ )
+		CString strSys = "set -e\n";
+#else
 		CString strSys = "echo off\n";
+#endif
 		for ( i = 0; i < sys->len; i++ )
 		{
 			strSys += (char *)g_ptr_array_index( sys, i );
 			Sys_Printf( "\n%s\n", (char *)g_ptr_array_index( sys, i ) );
+
+#if defined( __linux__ ) || defined( __BSD__ ) || defined( __APPLE__ )
+			strSys += "\n";
+#else
 			strSys += "\nIF %ERRORLEVEL% NEQ 0 goto error\n";
 		}
 		strSys += "\
@@ -1168,6 +1183,8 @@ ECHO.\n\
 :end\n\
 pause\n\
 ";
+#endif
+		}
 
 #if defined( __linux__ ) || defined( __BSD__ ) || defined( __APPLE__ )
 

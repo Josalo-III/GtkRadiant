@@ -996,6 +996,27 @@ This is the first measured threaded Mac compiler result; it replaces the old
 single-worker fallback without changing the source map or adding generated
 files to version control.
 
+The legacy BSP monitor is now opt-in per project recipe on every platform. Its
+`#` marker expands to Q3Map2's `-connect` option, so Q3Map2 recipes retain the
+existing socket/XML progress monitor. Recipes without that marker, including
+BSPC AAS generation, run directly and print their output in Radiant's console;
+they no longer wait for a connection their tool cannot make. This removes the
+misleading timeout without disabling a capability that compatible compilers
+still provide elsewhere.
+
+The direct-run path also now writes a real POSIX shell script on macOS, Linux,
+and BSD: `set -e` stops after the first failed compiler command. Previously it
+embedded Windows batch statements (`IF %ERRORLEVEL%` and `pause`) in
+`qe3bsp.sh`; after a successful compile, the missing `pause` command made the
+editor report shell status 127. Windows retains its batch-specific error path.
+
+The first eight-worker light run exposed a macOS-specific pthread default:
+worker stacks are only 512 KB, while Q3Map2's recursive lightmap subdivision
+can exceed that depth. The compiler now creates macOS workers with 8 MB stacks.
+The exact formerly crashing eight-worker q3dm1 light recipe then completed in
+four seconds. This preserves threaded VIS/light without silently falling back
+to one worker.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
