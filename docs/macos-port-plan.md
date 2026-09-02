@@ -1017,6 +1017,29 @@ The exact formerly crashing eight-worker q3dm1 light recipe then completed in
 four seconds. This preserves threaded VIS/light without silently falling back
 to one worker.
 
+#### Themepark geometry cleanup inventory
+
+The 2 September 2026 Themepark BSP diagnostic run found six flipped meta
+triangles. Their coordinates are the actionable editor targets:
+
+- `(1464, -1468, 1019)` — the high black-granite cluster around source brushes
+  2634–2636;
+- `(1593, -1584, 253)` — the nearby lower cluster, including brushes 3058–3059;
+- `(1334, -790, -8)` — the compact trim/caulk assembly around brush 1074;
+- `(984, -1238, 424)` — the large overlapping black-granite construction;
+- `(488, -618, 24)` — the small black-granite/rgrass assembly around brushes
+  2295 and 2402; and
+- a second triangle at `(1334, -790, -8)` sharing that same local assembly.
+
+These are compiler-generated vertices, so exact source brush ownership is not
+always unique in the subtract-era overlapping geometry. They are deliberately
+recorded as editor inspection points, not candidates for automatic map edits.
+The same run also reported three non-world areaportals (entities 263, 271, and
+272), a node without volume near `(1200.78, -881.83, 42.02)`, 378 tiny portals,
+and a fog-patch clipping warning. It reported zero degenerate edges and zero
+removed degenerate surfaces. The known `flame1side` missing-image warning is
+separate asset work.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
