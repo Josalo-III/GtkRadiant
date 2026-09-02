@@ -927,6 +927,28 @@ sharing and does not claim performance, map round-trip, compiler, or gameplay
 correctness. Those are the defined work of Phase 5, not reasons to keep
 reopening the GTK3 runtime port.
 
+### Phase 5 — compiler recipe and first fast-pipeline probe
+
+The native arm64 `install/q3map2` is built from GtkRadiant upstream's bundled
+Q3Map2 source, not an unverified binary distribution or the separate 2016
+source extraction. The active Mac `user2-macos.proj` now adds `-skyfix` to each
+Quake III BSP recipe: the single BSP command plus the BSP leg of the fast-test,
+full-test, and full-final pipelines. It is intentionally absent from VIS and
+light passes, where it has no meaning. The ignored runtime default template
+will be regenerated from this decision when the development launcher is
+formalized for packaging.
+
+The first updated fast-pipeline probe used the staged `q3dm1sample.map`.
+The BSP pass printed `GL_CLAMP sky fix/hack/workaround enabled`, parsed 987
+world brushes, 113 patches, and 161 entities, and wrote a 1,157,144-byte BSP
+in 0.56 seconds. It also found `Entity 156, Brush 0: Entity leaked`; Q3Map2
+therefore stopped after BSP and did not run VIS or light. The existing
+`textures/sfx/flame1side` warning is the known original-Q3 asset gap, not a
+compiler integration failure. This establishes native compiler invocation and
+the skyfix recipe, while classifying `q3dm1sample` as an editing/rendering
+fixture rather than the sealed full-pipeline test map. A future compile gate
+needs either a sealed fixture or a deliberate leak repair in a recovery map.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
@@ -982,10 +1004,14 @@ These recipes are behavioral requirements, not portable configuration files.
 The recovered project embeds Windows paths and executable names, so copying it
 into the Mac preference directory would create a misleading and fragile setup.
 The Mac recovery project should translate the known options onto isolated,
-writable macOS paths and native tools. An older `user6.proj` adds an
-experimental `-skyfix` final preset, but the 2022 preferences select
-`user2.proj`; preserve `-skyfix` as optional history rather than silently
-making it the baseline.
+writable macOS paths and native tools. The Q3 BSP recipes intentionally add
+`-skyfix`: Q3Map2 documents it as the workaround for the black GL_CLAMP border
+that can appear at skybox edges on ATI and newer NVIDIA hardware. It belongs on
+the BSP pass only; VIS and light consume the resulting BSP and do not accept
+the switch. The historical `user6.proj` made this available only in an
+experimental final preset, but the recovery workflow adopts it as the Quake
+III baseline because compatibility across period hardware is a real release
+property, not a cosmetic compile preference.
 
 #### Data and gamepack comparisons
 
