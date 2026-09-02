@@ -962,8 +962,10 @@ but the generated 4,647,072-byte BSP verifies every output stage: Q3Map2's
 read-only `-info` report lists 4,045 drawsurfaces, 29,990 draw vertices,
 visibility data, 16 lightmaps, and a 32,200-entry lightgrid. This is the first
 complete native-arm64 Q3Map2 pipeline result for the recovered workflow. The
-next Phase 5 gate is to load that BSP in ioquake3 and inspect it, especially
-the sky edges and the repaired leak area. The recovered end-of-run console
+result was loaded and played in ioquake3: the map was visually sound, with no
+reported glitches or performance hangs. This closes the first end-to-end
+native editing, compile, and gameplay gate, including inspection of the sky
+and repaired leak area. The recovered end-of-run console
 output later established that its light pass ran all eight radiosity bounces
 and exited normally in 46 seconds; this is specifically the displayed light
 stage's timing, not a combined BSP/VIS/light benchmark.
