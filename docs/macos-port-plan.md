@@ -1047,6 +1047,13 @@ completes; the user reports the threaded compiler as a substantial speed
 improvement overall. Treat the AAS pauses as a future profiling observation,
 not a reason to disable the verified Q3Map2 VIS/light worker pool.
 
+The user has since confirmed that bots load and play on the generated maps.
+That is a useful AAS smoke result—the game accepts the file and bot entities
+spawn—but it does not yet prove that bots select and traverse long routes
+correctly. A focused navigation check remains: observe several bots crossing
+the map, using lifts, jump pads, and teleports where present, and distinguish
+route gaps from ordinary combat idling before changing BSPC or the map.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.
