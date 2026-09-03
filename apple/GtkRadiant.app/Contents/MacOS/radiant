@@ -10,6 +10,19 @@ set -x
 
 resources="${RADIANT_HOME}/Contents/Resources"
 
+# Keep generated game descriptions and preferences outside the application
+# bundle.  This is required when running from a read-only DMG and also keeps a
+# packaged release separate from a source-tree development profile.
+user_data_root="${HOME}/Library/Application Support/GtkRadiant"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-${user_data_root}}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-${user_data_root}}"
+
+# MacPorts' libepoxy records its GL loader as an absolute /opt/local path and
+# opens it at runtime.  Prefer the relocated copy so epoxy and radiant.bin use
+# one libGL/X11 graph; loading both copies makes GtkGLArea report no compatible
+# pixel formats.
+export DYLD_LIBRARY_PATH="${resources}/lib${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+
 if [ -z "${DISPLAY:-}" ]; then
 	if [ -x /Applications/Utilities/XQuartz.app/Contents/MacOS/X11.bin ]; then
 		open -ga XQuartz
@@ -20,9 +33,9 @@ fi
 export FONTCONFIG_PATH="${resources}/etc/fonts"
 export FC_DEBUG=1024
 
-# Keep the GLX client matched to the installed XQuartz server.
-export GDK_GL_LIBGL_PATH="/opt/X11/lib/libGL.dylib"
-export GDK_GL_LIBGLU_PATH="/opt/X11/lib/libGLU.dylib"
+# The executable has a bundled, internally consistent MacPorts GLX/X11
+# dependency graph.  Do not override it with a separate GL loader here: the
+# known-good development launch does not set either GDK_GL_LIBGL*_PATH.
 export GDK_BACKEND=x11
 export GDK_GL=legacy
 

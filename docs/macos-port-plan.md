@@ -1016,19 +1016,51 @@ The legacy Apple recipe has been brought forward to GTK3 and macOS 11. It now
 copies GTK3 and GDK-Pixbuf runtime data, embeds recursive MacPorts library
 dependencies with `dylibbundler`, packages the arm64 Radiant, Q3Map2, Q3Map2-URT,
 Q3Data, and BSPC tools plus all built modules, and sets the bundle metadata to
-GtkRadiant 1.6.7. The resulting local development bundle is approximately
-238 MB; the generated `GtkRadiant-1.6.7.dmg` is approximately 81 MB.
+GtkRadiant 1.6.7. The release bundle also includes all twelve gamepacks from the
+official 1.6.7 archive. The resulting application is approximately 503 MB; the
+compressed `GtkRadiant-1.6.7.dmg` is approximately 187 MB.
 
-The bundle intentionally does not ship a second Mesa `libGL`: Q3Map2/Radiant
-now resolve `/opt/X11/lib/libGL.1.dylib`, keeping the GLX client matched to the
-XQuartz server. GTK and the compiler support libraries remain bundled.
+The first bundle launches exposed a packaging-only OpenGL failure. A controlled
+A/B test used the same XQuartz display, preferences, maps, launcher environment,
+and arm64 build: the unmodified executable created all four OpenGL 2.1 contexts
+with the Apple M1 Max Metal renderer, while the `dylibbundler`-relocated
+executable failed its first `GtkGLArea` with `No available configurations for
+the given pixel format`. This exonerated Finder launch, preferences, game data,
+and XQuartz startup and localized the failure to library relocation.
 
-This is a verified packaging checkpoint, not yet a clean-machine release:
-`install/games/q3.game` still contains the isolated recovery workspace paths,
-so the bundle remains tied to this checkout's staged Q3Pack and game data.
-The next packaging task is to resolve those paths relative to the bundle (and
-provide a user-selected Quake III data location) before calling the app
-relocatable. Personal maps and retail PAKs remain outside the bundle.
+The cause was a duplicate GL client graph. MacPorts' `libepoxy` embeds the
+absolute loader path `/opt/local/lib/libGL.1.dylib` and opens it at runtime,
+while `dylibbundler` rewrites Radiant's direct dependency to the bundled
+`libGL.1.dylib`. Loading both Mesa/GLX images and their X11 dependencies made
+GTK's framebuffer configurations unusable. Swapping Radiant alone to XQuartz's
+`libGL` was rejected after testing because it merely created a different mixed
+stack. The launcher now scopes `DYLD_LIBRARY_PATH` to the bundle's library
+directory so epoxy's runtime lookup resolves to the already-loaded bundled
+image. An isolated packaged-process probe then created all four shared contexts
+with the native Apple renderer. This environment change is deliberately local
+to the launched editor and does not modify the user's shell.
+
+Finder launches were then verified both with XQuartz already running and with
+the bundle starting XQuartz. One intervening XQuartz server crash occurred in
+its asynchronous CoreGraphics backing-store callback after several forced test
+client terminations; a clean-server retry succeeded and Radiant's log showed
+that all contexts and the main event loop had initialized before that server
+failure.
+
+The packaged launcher stores preferences and generated game descriptions under
+`~/Library/Application Support/GtkRadiant`, separate from both the application
+and source-tree development profiles. The build removes the recovery-generated
+`q3.game`, so a first run uses the bundled gamepacks to ask for the user's game
+directory rather than publishing checkout-specific paths. The DMG is built from
+a separate staging root and contains only the application and an Applications
+alias; this prevents an older DMG from being recursively included in its
+replacement. The completed app receives a final ad-hoc deep signature after
+library rewriting.
+
+This is suitable for a clearly labeled arm64 preview, not yet a notarized or
+clean-machine-qualified final release. No Apple Developer ID is installed, and
+the bundle has not yet been tested on a Mac without the build-time MacPorts
+installation. Personal maps and retail game data remain outside the bundle.
 
 The first eight-worker light run exposed a macOS-specific pthread default:
 worker stacks are only 512 KB, while Q3Map2's recursive lightmap subdivision

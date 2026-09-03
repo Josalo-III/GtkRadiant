@@ -10,6 +10,7 @@ DATADIR = $(RESOURCES)/share
 LIBDIR = $(RESOURCES)/lib
 VERSION = 1.6.7
 DMG = $(TARGET)/GtkRadiant-$(VERSION).dmg
+DMGROOT = $(TARGET)/dmg-root
 VOLUME_NAME = "GtkRadiant $(VERSION)"
 
 # We must rewrite some Gtk configuration files, which vary from environment to
@@ -43,11 +44,12 @@ all: install bundle
 	cp -r $(MACPORTS_PREFIX)/share/themes/Default $(RESOURCES)/share
 
 install: -pre-install -gtk-runtime
+	test -d $(INSTALL)/installs/Q3Pack
 	cp -r $(INSTALL) $(RESOURCES)
 	rm -rf `find $(RESOURCES)/install -type d -name .svn`
-	if grep -q 'macOS recovery' $(RESOURCES)/install/games/q3.game; then \
-		sed -i '' 's/Quake III Arena (macOS recovery)/Quake III Arena/' $(RESOURCES)/install/games/q3.game; \
-	fi
+	# Game paths are per-user state.  The bundled Q3Pack drives the first-run
+	# configuration dialog; never publish a developer's generated q3.game.
+	rm -f $(RESOURCES)/install/games/q3.game
 
 bundle:
 	
@@ -65,19 +67,21 @@ bundle:
 		`find $(BINDIR)/modules -name "*.so" | xargs -I {} echo -x {}` \
 		`find $(LIBDIR) -name "*.so" | xargs -I {} echo -x {}` \
 	-d $(LIBDIR) -of -p @executable_path/../lib
-	# Use XQuartz's GLX client consistently; bundling MacPorts libGL alongside
-	# XQuartz produces two incompatible GL stacks in the same process.
-	install_name_tool -change "@executable_path/../lib/libGL.1.dylib" \
-		/opt/X11/lib/libGL.1.dylib $(BINDIR)/radiant.bin
-	rm -f $(LIBDIR)/libGL.1.dylib
 	
 	rm -f build
+	# Seal the completed application after dylibbundler has rewritten and signed
+	# its individual Mach-O files.  This is ad-hoc signing; public notarization
+	# remains a separate Apple Developer ID release step.
+	codesign --force --deep --sign - $(TARGET)/GtkRadiant.app
 
 image:
-	find $(TARGET) -name .DS_Store -delete
-	ln -f -s /Applications $(TARGET)/Applications
-	hdiutil create -ov $(DMG) -srcfolder $(TARGET) -volname $(VOLUME_NAME)
-	rm $(TARGET)/Applications
+	rm -rf $(DMGROOT)
+	install -d $(DMGROOT)
+	cp -R $(TARGET)/GtkRadiant.app $(DMGROOT)
+	ln -s /Applications $(DMGROOT)/Applications
+	find $(DMGROOT) -name .DS_Store -delete
+	hdiutil create -ov $(DMG) -srcfolder $(DMGROOT) -volname $(VOLUME_NAME)
+	rm -rf $(DMGROOT)
 
 clean:
 	rm -rf $(TARGET)/*
