@@ -20,9 +20,9 @@ fi
 export FONTCONFIG_PATH="${resources}/etc/fonts"
 export FC_DEBUG=1024
 
-# GLX belongs to the installed XQuartz server; use its matching client pair.
-export GDK_GL_LIBGL_PATH="/opt/X11/lib/libGL.1.dylib"
-export GDK_GL_LIBGLU_PATH="/opt/X11/lib/libGLU.1.dylib"
+# Match the verified development launcher: MacPorts Mesa through XQuartz.
+export GDK_GL_LIBGL_PATH="/opt/local/lib/libGL.dylib"
+export GDK_GL_LIBGLU_PATH="/opt/X11/lib/libGLU.dylib"
 export GDK_BACKEND=x11
 export GDK_GL=legacy
 
