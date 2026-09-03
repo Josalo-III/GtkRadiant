@@ -1,7 +1,6 @@
 #!/bin/bash
 
-RADIANT_HOME=$(dirname "$0")
-RADIANT_HOME=${RADIANT_HOME/GtkRadiant.app*/GtkRadiant.app}
+RADIANT_HOME=$(cd "$(dirname "$0")/../.." && pwd)
 
 echo
 echo "Starting GtkRadiant in ${RADIANT_HOME}"
@@ -10,6 +9,13 @@ echo
 set -x
 
 resources="${RADIANT_HOME}/Contents/Resources"
+
+if [ -z "${DISPLAY:-}" ]; then
+	if [ -x /Applications/Utilities/XQuartz.app/Contents/MacOS/X11.bin ]; then
+		open -ga XQuartz
+	fi
+	export DISPLAY=:0
+fi
 
 export FONTCONFIG_PATH="${resources}/etc/fonts"
 export FC_DEBUG=1024

@@ -45,6 +45,9 @@ all: install bundle
 install: -pre-install -gtk-runtime
 	cp -r $(INSTALL) $(RESOURCES)
 	rm -rf `find $(RESOURCES)/install -type d -name .svn`
+	if grep -q 'macOS recovery' $(RESOURCES)/install/games/q3.game; then \
+		sed -i '' 's/Quake III Arena (macOS recovery)/Quake III Arena/' $(RESOURCES)/install/games/q3.game; \
+	fi
 
 bundle:
 	
