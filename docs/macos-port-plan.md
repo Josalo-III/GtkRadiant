@@ -1019,6 +1019,10 @@ Q3Data, and BSPC tools plus all built modules, and sets the bundle metadata to
 GtkRadiant 1.6.7. The resulting local development bundle is approximately
 238 MB; the generated `GtkRadiant-1.6.7.dmg` is approximately 81 MB.
 
+The bundle intentionally does not ship a second Mesa `libGL`: Q3Map2/Radiant
+now resolve `/opt/X11/lib/libGL.1.dylib`, keeping the GLX client matched to the
+XQuartz server. GTK and the compiler support libraries remain bundled.
+
 This is a verified packaging checkpoint, not yet a clean-machine release:
 `install/games/q3.game` still contains the isolated recovery workspace paths,
 so the bundle remains tied to this checkout's staged Q3Pack and game data.

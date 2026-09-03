@@ -65,6 +65,11 @@ bundle:
 		`find $(BINDIR)/modules -name "*.so" | xargs -I {} echo -x {}` \
 		`find $(LIBDIR) -name "*.so" | xargs -I {} echo -x {}` \
 	-d $(LIBDIR) -of -p @executable_path/../lib
+	# Use XQuartz's GLX client consistently; bundling MacPorts libGL alongside
+	# XQuartz produces two incompatible GL stacks in the same process.
+	install_name_tool -change "@executable_path/../lib/libGL.1.dylib" \
+		/opt/X11/lib/libGL.1.dylib $(BINDIR)/radiant.bin
+	rm -f $(LIBDIR)/libGL.1.dylib
 	
 	rm -f build
 
