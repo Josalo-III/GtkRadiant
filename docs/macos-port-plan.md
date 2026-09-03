@@ -1010,6 +1010,22 @@ embedded Windows batch statements (`IF %ERRORLEVEL%` and `pause`) in
 `qe3bsp.sh`; after a successful compile, the missing `pause` command made the
 editor report shell status 127. Windows retains its batch-specific error path.
 
+### Phase 6 — first GTK3 arm64 application bundle
+
+The legacy Apple recipe has been brought forward to GTK3 and macOS 11. It now
+copies GTK3 and GDK-Pixbuf runtime data, embeds recursive MacPorts library
+dependencies with `dylibbundler`, packages the arm64 Radiant, Q3Map2, Q3Map2-URT,
+Q3Data, and BSPC tools plus all built modules, and sets the bundle metadata to
+GtkRadiant 1.6.7. The resulting local development bundle is approximately
+238 MB; the generated `GtkRadiant-1.6.7.dmg` is approximately 81 MB.
+
+This is a verified packaging checkpoint, not yet a clean-machine release:
+`install/games/q3.game` still contains the isolated recovery workspace paths,
+so the bundle remains tied to this checkout's staged Q3Pack and game data.
+The next packaging task is to resolve those paths relative to the bundle (and
+provide a user-selected Quake III data location) before calling the app
+relocatable. Personal maps and retail PAKs remain outside the bundle.
+
 The first eight-worker light run exposed a macOS-specific pthread default:
 worker stacks are only 512 KB, while Q3Map2's recursive lightmap subdivision
 can exceed that depth. The compiler now creates macOS workers with 8 MB stacks.
