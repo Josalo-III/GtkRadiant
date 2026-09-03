@@ -1,0 +1,4 @@
+LIBRARY      "shaderpreview"
+
+EXPORTS
+	Synapse_EnumerateInterfaces @1
