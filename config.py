@@ -214,7 +214,7 @@ class Config:
                      'contrib/hydratoolz/hydratoolz.vcxproj',
                      'contrib/bobtoolz/bobtoolz.vcxproj',
                      'contrib/gtkgensurf/gtkgensurf.vcxproj',
-                     'contrib/shaderpreview/shaderpreview.vcxproj',
+                     'contrib/shadershop/shadershop.vcxproj',
                      'contrib/bkgrnd2d/bkgrnd2d.vcxproj',
                  ]:
                 ( libpath, libname ) = os.path.split( project )

@@ -21,13 +21,16 @@
     <Link>
       <AdditionalDependencies>glib-2.0.lib;gobject-2.0.lib;gtk-win32-2.0.lib;gdk-win32-2.0.lib;synapse.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SolutionDir)\..\gtk-2.24.10\lib;$(SolutionDir)\build\$(Configuration)\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <ModuleDefinitionFile>shaderpreview.def</ModuleDefinitionFile>
+      <ModuleDefinitionFile>shadershop.def</ModuleDefinitionFile>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="plugin.cpp" />
     <ClCompile Include="preview.cpp" />
   </ItemGroup>
-  <ItemGroup><None Include="shaderpreview.def" /></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shadershop.h" />
+    <None Include="shadershop.def" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

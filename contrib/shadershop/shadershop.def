@@ -1,4 +1,4 @@
-LIBRARY      "shaderpreview"
+LIBRARY      "shadershop"
 
 EXPORTS
 	Synapse_EnumerateInterfaces @1
