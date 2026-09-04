@@ -64,7 +64,7 @@ extern "C" CSynapseClient* SYNAPSE_DLL_EXPORT Synapse_EnumerateInterfaces( const
 	g_SynapseClient.AddAPI( RADIANT_MAJOR, NULL, sizeof( _QERFuncTable_1 ), SYN_REQUIRE, &g_FuncTable );
 	// Keep the preview loadable in configurations where the optional shaders
 	// module is not installed; direct image loading still works in that case.
-	g_SynapseClient.AddAPI( SHADERS_MAJOR, NULL, sizeof( _QERShadersTable ), SYN_REQUIRE_ANY, &g_ShadersTable );
+	g_SynapseClient.AddAPI( SHADERS_MAJOR, "*", sizeof( _QERShadersTable ), SYN_REQUIRE_ANY, &g_ShadersTable );
 	g_SynapseClient.AddAPI( QGL_MAJOR, NULL, sizeof( _QERQglTable ), SYN_REQUIRE, &g_QglTable );
 	g_SynapseClient.AddAPI( UIGTK_MAJOR, NULL, sizeof( _QERUIGtkTable ), SYN_REQUIRE, &g_UIGtkTable );
 

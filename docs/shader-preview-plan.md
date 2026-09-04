@@ -18,10 +18,10 @@ the constructed stack, then grows into a source-first shader editor.
 
 The intended delivery order is:
 
-1. Preview surface.
-2. Image-file stage loading and stage-stack reordering.
-3. Frame rate and stage animation.
-4. Blend/compositing modes.
+1. Stable preview surface and selected-shader image.
+2. Read-only shader-document parsing into an ordered stage model.
+3. Correct stage image loading, compositing, and animation playback.
+4. Visible/reorderable stage stack and controlled editing.
 5. Shader-file creation and source editing.
 
 ## Technical architecture
@@ -49,8 +49,10 @@ SCons module list. It initially requires these established APIs:
 - `UIGTK_MAJOR` for a Radiant-owned GL widget.
 - `QGL_MAJOR` for Radiant's portable OpenGL dispatch table.
 
-The shader and VFS APIs are added when the module begins loading or writing
-shader documents.
+The optional shader API supplies selection metadata, including the source
+`.shader` filename. The preview must use its non-loading lookup only: a lookup
+that causes Radiant to load/bind a texture from a GTK callback can use the
+wrong GL context. Shader source is read through Radiant's VFS-aware file API.
 
 ### Cross-platform GL contract
 
@@ -68,6 +70,12 @@ The GTK adapter creates the surface through
 All GL objects belong to this preview context. No preview texture is shared
 with Radiant's main context. Create, upload, and delete those objects only
 while this context is current.
+
+On GTK 3, queue the first render after the widget is realized *and* from an
+idle callback after it is mapped. A pre-realize request may be discarded and
+leave the preview blank until unrelated UI damage, such as a button hover.
+Idle callbacks must consult the live preview widget rather than retain a
+destroyed widget pointer.
 
 ### Image and file boundary
 
@@ -96,38 +104,60 @@ close/reopen and resize behaviour; no file loading or shader parsing.
 reopen all render correctly without GL-context errors. The module also builds
 through the GTK 2 code path.
 
-### 2. File loader and stack
+**Status:** implemented and exercised on macOS GTK 3. The selected shader's
+representative image is shown at its native aspect ratio, with source alpha
+over a checkerboard. The checkerboard is intentionally the built-in
+transparency background; an optional user image belongs in a later preview
+appearance preference.
 
-Add a stage list with Add, Remove, Move Up, and Move Down actions. The initial
-selection captured by the preview becomes the document being loaded. Each
-stage holds a VFS image path and uploads an independent texture. Draw stages in
-their listed order with an initially fixed opaque blend state.
+### 2. Read-only shader document
 
-**Acceptance:** two distinct images load; moving either stage immediately
-changes the rendered order; failed paths leave the current preview intact and
-produce a useful error.
+Parse the selected shader's source block into an explicit document model. A
+stage contains its map kind, image source(s), blend factors, colour/alpha
+generation, texture-coordinate modifiers, and unsupported directives. The
+parser must preserve stage order and distinguish:
 
-### 3. Time and animation
+- `map` and `clampmap` single-image stages;
+- `animMap` frequency plus its full frame list (not merely its first token);
+- special maps such as `$lightmap` and `$whiteimage`;
+- stages with no ordinary image, which may rely on generated colour/alpha.
 
-Add a timer owned by the GTK main loop, Play/Pause, Reset, elapsed-time display,
-and a configurable preview frame rate. The timer changes model time only and
-queues a render. Add `animMap`-style frame sequences and basic scrolling or
-rotating texture coordinates after the transport is stable.
+**Acceptance:** the preview displays a read-only stage count and source list
+that matches representative static, animated, and text-oriented shaders.
 
-**Acceptance:** animation pauses deterministically, resumes without a time
-jump, and does not draw after the window is destroyed.
+**Status:** initial source-block lookup and static-map extraction are present.
+The current parser is deliberately not yet sufficient for `animMap` frame
+lists or special maps; it must be replaced by the explicit document model
+before visual parity is claimed.
 
-### 4. Compositing
+### 3. Playback and compositing
 
-Expose a small, named set of blend presets first, then the underlying source
-and destination blend factors. Add alpha-test, depth-write, depth-function,
-constant colour, and alpha controls as the renderer supports them. Map these
-directly to the equivalent Quake 3 stage concepts.
+Load and cache all stage images into preview-owned GL textures. Render stages
+in order over the checkerboard. Apply the parsed `blendFunc` per stage rather
+than exposing a global preview blend selector. Add a GTK main-loop timer that
+only advances document time and queues a render; it never performs GL work.
 
-**Acceptance:** test fixtures demonstrate opaque, additive, filter, and alpha
-blend results in the expected stage order.
+Implement `animMap` by choosing `floor(time * frequency) mod frameCount`.
+Then add `tcMod scroll`, `scale`, and `rotate`, followed by simple `rgbGen` and
+`alphaGen` cases. Keep unsupported directives visible in the UI/source rather
+than silently treating them as ordinary alpha layers.
 
-### 5. Shader documents and editor entry point
+**Acceptance:** a known `animMap` shader visibly advances, pauses
+deterministically, and resumes without a time jump. Static shaders using
+additive, filter, and alpha blend display in the expected stage order. Closing
+the window leaves no timer or render callback targeting its destroyed context.
+
+### 4. Stage stack and editing entry point
+
+Add a visible, reorderable stage list with Add, Remove, Move Up, and Move Down
+actions. The preview remains the first interface; `Edit Shader...` opens the
+authoring controls only once the read-only renderer accurately explains the
+source document.
+
+**Acceptance:** moving two distinct editable stages immediately changes the
+previewed order while preserving unrecognised source directives.
+
+### 5. Shader documents and editor
 
 Serialize the stage model to a single shader block and write it to a loose
 shader file. Reload the changed relative `scripts/...shader` file through
@@ -159,5 +189,23 @@ smoke test used on macOS and Linux.
 - A complete parser for every engine and Q3Map2 extension.
 - Rewriting existing PK3 files.
 - GPU-program/shader-language rendering beyond the portable OpenGL 2.1 path.
+
+## Implementation pitfalls recorded so far
+
+- GTK may warn that legacy GL 2.1 is below its nominal GTK 3 requirement even
+  when it successfully creates the required compatibility context. Treat the
+  actual context report as the capability result.
+- Apple's OpenGL-on-Metal layer can fall back to software fixed-function
+  fragment processing. This is a performance concern, not a reason to add
+  platform-specific GL code; cache parsing and uploads before changing the
+  rendering contract.
+- Image loaders do not necessarily share a row-origin convention. Preserve the
+  verified texture-coordinate convention and validate it against more than one
+  image format before introducing per-format flips.
+- Do not rely on Radiant's representative texture as a shader preview. It can
+  be an editor image and does not expose the shader's stage stack.
+- A global Alpha/Additive/Multiply control is misleading in preview mode.
+  Blending belongs to each parsed stage; user editing controls come after the
+  source-derived renderer is trustworthy.
 
 These can be revisited after the stage workflow has proven useful.
