@@ -393,9 +393,19 @@ That null-terminated VFS buffer is passed to
 lexical copy merely to parse it.
 
 A packaged asset may be previewed, but ShaderShop never modifies a PK3 in
-place. Later authoring writes loose `scripts/*.shader` files. Editing a shader
-whose source exists only in a PK3 therefore becomes an explicit override/save
-operation.
+place. Opening any shader creates a private, mutable in-memory document copied
+from the VFS source; preview and editing always operate on that copy, never on
+the source file in situ. Later authoring writes loose `scripts/*.shader` files.
+Editing a shader whose source exists only in a PK3 therefore becomes an
+explicit override/save operation.
+
+Saving an existing shader is deliberately a two-step replacement operation.
+`Save As` initially proposes its existing loose shader filename (or the
+corresponding loose `scripts/*.shader` override name for a packaged source),
+but does not silently replace it. The user must retain or re-enter that target
+name and explicitly accept the normal overwrite warning before ShaderShop
+replaces an existing `.shader` file. Until then, all changes remain only in the
+private in-memory document.
 
 ## Fault tolerance policy
 
@@ -743,9 +753,9 @@ directive resolving to an unintended factor.
 the shipped corpus. Explicit blend-factor case folding plus `add`, `filter`,
 and `blend` shorthand are implemented. `$lightmap` uses neutral generated
 white in the bare preview, while `clampmap` uses clamp-to-edge so animated
-jumppad rings do not tile into the frame. `rgbGen wave` and `tcMod stretch`
-provide the first time-based jumppad effect. Remaining parity work includes
-exact square-wave evaluation, ordered general `tcMod`, alpha functions,
+jumppad rings do not tile into the frame. `rgbGen wave`, `tcMod stretch`, and
+`tcMod scroll` provide the first time-based jumppad and sky effects. Remaining
+parity work includes exact square-wave evaluation, ordered general `tcMod`, alpha functions,
 generated sources, and a real surface lightmap path.
 
 ### 4. Stage stack and editing entry point
@@ -769,6 +779,13 @@ preserving unrecognized source material.
 
 This is the point where the current preview parser should be promoted into a
 real source/document subsystem.
+
+Opening makes an isolated, mutable `ShaderDocument` copy of the selected
+definition's VFS source. The preview may re-render that document immediately as
+edits are made, while the installed loose file remains untouched. Saving is a
+separate operation with dirty-state tracking and an overwrite confirmation for
+an existing target; it must never be an implicit consequence of changing a
+control or closing the preview.
 
 The source becomes authoritative. The editor should preserve:
 

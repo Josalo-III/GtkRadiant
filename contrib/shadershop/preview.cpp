@@ -24,6 +24,19 @@ static GtkWidget* g_pPreviewWidget = NULL;
 static GtkWidget* g_pSelectionLabel = NULL;
 static GtkWidget* g_stageLabel = NULL;
 static GtkWidget* g_animationButton = NULL;
+static GtkWidget* g_3dInspectButton = NULL;
+
+// The normal view remains an exact 2D material swatch.  Inspection mode uses
+// the same renderer under an orbitable 3D camera so vertex effects can be
+// judged from more than the one front-on view.
+static bool g_3dInspect = false;
+static float g_inspectYaw = 28.0f;
+static float g_inspectPitch = -24.0f;
+static float g_inspectPanX = 0.0f;
+static float g_inspectPanY = 0.0f;
+static float g_inspectZoom = 1.0f;
+static double g_pointerX = 0.0;
+static double g_pointerY = 0.0;
 
 static GLuint g_checkerboardTexture = 0;
 static GLuint g_selectedTexture = 0;
@@ -53,6 +66,7 @@ struct PreviewStage
 	std::string blendSrc;
 	std::string blendDst;
 	bool clamp;
+	bool generatedLightmap;
 	unsigned char* pixels;
 	int width;
 	int height;
@@ -61,8 +75,10 @@ struct PreviewStage
 	float animationFps;
 	bool rgbWave;
 	bool stretchWave;
+	bool scroll;
 	float rgbBase, rgbAmplitude, rgbPhase, rgbFrequency;
 	float stretchBase, stretchAmplitude, stretchPhase, stretchFrequency;
+	float scrollS, scrollT;
 	std::vector<std::string> animationNames;
 	std::vector<AnimationFrame> animationFrames;
 
@@ -70,18 +86,34 @@ struct PreviewStage
 		blendSrc( "GL_SRC_ALPHA" ),
 		blendDst( "GL_ONE_MINUS_SRC_ALPHA" ),
 		clamp( false ),
+		generatedLightmap( false ),
 		pixels( NULL ),
 		width( 0 ),
 		height( 0 ),
 		texture( 0 ),
 		uploaded( false ),
-		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ),
+		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ), scroll( false ),
 		rgbBase( 1.0f ), rgbAmplitude( 0.0f ), rgbPhase( 0.0f ), rgbFrequency( 0.0f ),
-		stretchBase( 1.0f ), stretchAmplitude( 0.0f ), stretchPhase( 0.0f ), stretchFrequency( 0.0f )
+		stretchBase( 1.0f ), stretchAmplitude( 0.0f ), stretchPhase( 0.0f ), stretchFrequency( 0.0f ),
+		scrollS( 0.0f ), scrollT( 0.0f )
 	{}
 };
 
 static std::vector<PreviewStage> g_stages;
+static std::string g_editorImageName;
+
+// A selected texture name and a shader definition are separate things in the
+// Quake 3 asset model.  Keep that distinction through parsing so the UI does
+// not describe a perfectly usable raw image as a failed shader parse.
+enum ShaderSourceState
+{
+	SHADER_SOURCE_RAW_IMAGE,
+	SHADER_SOURCE_PARSED,
+	SHADER_SOURCE_UNAVAILABLE,
+	SHADER_SOURCE_MALFORMED
+};
+
+static ShaderSourceState g_shaderSourceState = SHADER_SOURCE_RAW_IMAGE;
 
 // Parse and load diagnostics for the current selection. Malformed or
 // unsupported source is tolerated rather than fatal, but it is never silent:
@@ -211,6 +243,7 @@ static void load_stage_images(){
 					stage->pixels = static_cast<unsigned char*>( g_malloc( 4 ) );
 					stage->pixels[0] = stage->pixels[1] = stage->pixels[2] = stage->pixels[3] = 255;
 					stage->width = stage->height = 1;
+					stage->generatedLightmap = true;
 				}
 				else if ( stage->mapName[0] == '$' ) {
 					shadershop_warn(
@@ -226,7 +259,7 @@ static void load_stage_images(){
 		else {
 			shadershop_warn( "stage %d: no image source", stageNumber );
 		}
-		if ( stage->rgbWave || stage->stretchWave ) g_animationClockFps = std::max( g_animationClockFps, 30.0f );
+		if ( stage->rgbWave || stage->stretchWave || stage->scroll ) g_animationClockFps = std::max( g_animationClockFps, 30.0f );
 	}
 }
 
@@ -284,11 +317,14 @@ static bool name_equals( const std::string& token, const char* name ){
 static void parse_selected_stages( const char* shaderName ){
 	clear_stages();
 	g_diagnostics.clear();
+	g_editorImageName.clear();
+	g_shaderSourceState = SHADER_SOURCE_RAW_IMAGE;
 
 	if ( shaderName == NULL || g_ShadersTable.m_pfnShader_ForName_NoLoad == NULL || g_FuncTable.m_pfnLoadFile == NULL ||
 		 g_ScripLibTable.m_pfnStartTokenParsing == NULL || g_ScripLibTable.m_pfnGetToken == NULL ||
 		 g_ScripLibTable.m_pfnToken == NULL || g_ScripLibTable.m_pfnScriptLine == NULL ||
 		 g_ScripLibTable.m_pfnUnGetToken == NULL ) {
+		g_shaderSourceState = SHADER_SOURCE_UNAVAILABLE;
 		return;
 	}
 
@@ -296,12 +332,16 @@ static void parse_selected_stages( const char* shaderName ){
 	// from the UI callback, where the preview GL context is not current.
 	IShader* shader = g_ShadersTable.m_pfnShader_ForName_NoLoad( shaderName );
 	if ( shader == NULL || shader->getShaderFileName() == NULL || shader->getShaderFileName()[0] == '\0' ) {
+		// No source file is the ordinary raw-image case, not an error.
 		return;
 	}
+	g_shaderSourceState = SHADER_SOURCE_MALFORMED;
 
 	void* buffer = NULL;
 	const int size = g_FuncTable.m_pfnLoadFile( shader->getShaderFileName(), &buffer );
 	if ( size <= 0 || buffer == NULL ) {
+		g_shaderSourceState = SHADER_SOURCE_UNAVAILABLE;
+		shadershop_warn( "could not read shader source '%s'", shader->getShaderFileName() );
 		return;
 	}
 
@@ -348,6 +388,14 @@ static void parse_selected_stages( const char* shaderName ){
 			// neighbour's stages instead.
 			if ( depth == 0 && name_equals( token, shaderName ) ) {
 				inShader = true;
+			}
+			continue;
+		}
+
+		if ( depth == 1 && keyword_equals( token, "qer_editorimage" ) ) {
+			std::string imageName;
+			if ( next_script_token_on_line( g_ScripLibTable.m_pfnScriptLine(), imageName ) ) {
+				g_editorImageName = imageName;
 			}
 			continue;
 		}
@@ -439,10 +487,22 @@ static void parse_selected_stages( const char* shaderName ){
 				stage.blendDst = dst;
 			}
 		}
-		else if ( keyword_equals( token, "rgbGen" ) || keyword_equals( token, "tcMod" ) ) {
-			const bool isRgb = keyword_equals( token, "rgbGen" );
+		else if ( keyword_equals( token, "tcMod" ) ) {
 			std::string mode;
-			if ( !next_script_token_on_line( directiveLine, mode ) || !keyword_equals( mode, isRgb ? "wave" : "stretch" ) ) continue;
+			if ( !next_script_token_on_line( directiveLine, mode ) ) continue;
+			if ( keyword_equals( mode, "scroll" ) ) {
+				std::string s, t;
+				if ( !next_script_token_on_line( directiveLine, s ) || !next_script_token_on_line( directiveLine, t ) ) {
+					shadershop_warn( "stage %d: incomplete tcMod scroll", stageNumber );
+				}
+				else {
+					stage.scroll = true;
+					stage.scrollS = static_cast<float>( atof( s.c_str() ) );
+					stage.scrollT = static_cast<float>( atof( t.c_str() ) );
+				}
+				continue;
+			}
+			if ( !keyword_equals( mode, "stretch" ) ) continue;
 			std::string wave, base, amplitude, phase, frequency;
 			if ( !next_script_token_on_line( directiveLine, wave ) || !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
 				shadershop_warn( "stage %d: incomplete %s %s", stageNumber, token.c_str(), mode.c_str() );
@@ -450,8 +510,22 @@ static void parse_selected_stages( const char* shaderName ){
 			}
 			if ( !keyword_equals( wave, "sin" ) && !keyword_equals( wave, "square" ) ) { shadershop_warn( "stage %d: wave '%s' is not supported yet", stageNumber, wave.c_str() ); continue; }
 			const float b = static_cast<float>( atof( base.c_str() ) ), a = static_cast<float>( atof( amplitude.c_str() ) ), p = static_cast<float>( atof( phase.c_str() ) ), f = static_cast<float>( atof( frequency.c_str() ) );
-			if ( isRgb ) { stage.rgbWave = true; stage.rgbBase = b; stage.rgbAmplitude = a; stage.rgbPhase = p; stage.rgbFrequency = f; }
-			else { stage.stretchWave = true; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f; }
+			stage.stretchWave = true; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f;
+		}
+		else if ( keyword_equals( token, "rgbGen" ) ) {
+			std::string mode;
+			if ( !next_script_token_on_line( directiveLine, mode ) || !keyword_equals( mode, "wave" ) ) continue;
+			std::string wave, base, amplitude, phase, frequency;
+			if ( !next_script_token_on_line( directiveLine, wave ) || !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
+				shadershop_warn( "stage %d: incomplete rgbGen wave", stageNumber );
+				continue;
+			}
+			if ( !keyword_equals( wave, "sin" ) && !keyword_equals( wave, "square" ) ) { shadershop_warn( "stage %d: wave '%s' is not supported yet", stageNumber, wave.c_str() ); continue; }
+			stage.rgbWave = true;
+			stage.rgbBase = static_cast<float>( atof( base.c_str() ) );
+			stage.rgbAmplitude = static_cast<float>( atof( amplitude.c_str() ) );
+			stage.rgbPhase = static_cast<float>( atof( phase.c_str() ) );
+			stage.rgbFrequency = static_cast<float>( atof( frequency.c_str() ) );
 		}
 	}
 
@@ -470,6 +544,9 @@ static void parse_selected_stages( const char* shaderName ){
 
 	g_free( buffer );
 	load_stage_images();
+	if ( inShader && shaderClosed ) {
+		g_shaderSourceState = SHADER_SOURCE_PARSED;
+	}
 }
 
 static void clear_selected_image(){
@@ -506,6 +583,17 @@ static gboolean animation_tick( gpointer ){
 	return TRUE;
 }
 
+static void queue_preview_render(){
+	if ( g_pPreviewWidget == NULL ) {
+		return;
+	}
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
+#else
+	gtk_widget_queue_draw( g_pPreviewWidget );
+#endif
+}
+
 static void start_animation_timer(){
 	if ( g_animationTimer == 0 && !g_animationPaused && g_animationClockFps > 0.0f ) {
 		guint interval = static_cast<guint>( 1000.0f / g_animationClockFps );
@@ -530,12 +618,72 @@ static void animation_clicked( GtkButton*, gpointer ){
 	}
 }
 
+static const char* normalise_shader_name( const char* selected, std::string& storage ){
+	if ( selected != NULL && !strncmp( selected, "texture/", 8 ) ) {
+		storage = "textures/";
+		storage += selected + 8;
+		return storage.c_str();
+	}
+	return selected;
+}
+
+static void set_stage_label( bool hasDirectImage, bool hasEditorImage ){
+	if ( g_stageLabel == NULL ) {
+		return;
+	}
+
+	char stages[256];
+	switch ( g_shaderSourceState ) {
+	case SHADER_SOURCE_RAW_IMAGE:
+		snprintf( stages, sizeof( stages ), "Raw image — no .shader definition" );
+		break;
+	case SHADER_SOURCE_PARSED:
+		if ( g_stages.empty() ) {
+			snprintf( stages, sizeof( stages ), "Shader definition — no render stages" );
+		}
+		else {
+			snprintf(
+				stages,
+				sizeof( stages ),
+				"Shader definition: %d stages, %s, animated: %d",
+				static_cast<int>( g_stages.size() ),
+				hasDirectImage ? "direct thumbnail image" : ( hasEditorImage ? "editor thumbnail image" : "no thumbnail image" ),
+				animated_stage_count()
+			);
+		}
+		break;
+	case SHADER_SOURCE_UNAVAILABLE:
+		snprintf( stages, sizeof( stages ), "Shader source unavailable — direct image preview" );
+		break;
+	case SHADER_SOURCE_MALFORMED:
+		snprintf( stages, sizeof( stages ), "Shader definition could not be parsed" );
+		break;
+	}
+
+	// Tolerated problems are reported here as well as on the console, so a
+	// wrong-looking preview can be told apart from a correct one.
+	if ( !g_diagnostics.empty() ) {
+		char issues[64];
+		snprintf(
+			issues,
+			sizeof( issues ),
+			" — %d issue%s, see console",
+			static_cast<int>( g_diagnostics.size() ),
+			g_diagnostics.size() == 1 ? "" : "s"
+		);
+		strncat( stages, issues, sizeof( stages ) - strlen( stages ) - 1 );
+	}
+	gtk_label_set_text( GTK_LABEL( g_stageLabel ), stages );
+}
+
 void ShaderShop_RefreshSelection(){
 	if ( g_pSelectionLabel == NULL ) {
 		return;
 	}
 
-	const char* selected = g_FuncTable.m_pfnGetCurrentTexture();
+	const char* rawSelected = g_FuncTable.m_pfnGetCurrentTexture();
+	std::string selectedStorage;
+	const char* selected = normalise_shader_name( rawSelected, selectedStorage );
 	if ( selected != NULL && selected[0] != '\0' ) {
 		char text[512];
 		snprintf( text, sizeof( text ), "Selected shader: %s", selected );
@@ -556,56 +704,28 @@ void ShaderShop_RefreshSelection(){
 			gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Pause" );
 		}
 
-		if ( g_stageLabel != NULL ) {
-			char stages[192];
-			if ( !g_stages.empty() ) {
-				snprintf(
-					stages,
-					sizeof( stages ),
-					"Parsed stages: %d, animated: %d",
-					static_cast<int>( g_stages.size() ),
-					animated_stage_count()
-				);
-			}
-			else {
-				snprintf( stages, sizeof( stages ), "Parsed stages: 0 (shader API/file unavailable)" );
-			}
-
-			// Tolerated problems are reported here as well as on the console, so
-			// a wrong-looking preview can be told apart from a correct one.
-			if ( !g_diagnostics.empty() ) {
-				char issues[64];
-				snprintf(
-					issues,
-					sizeof( issues ),
-					" — %d issue%s, see console",
-					static_cast<int>( g_diagnostics.size() ),
-					g_diagnostics.size() == 1 ? "" : "s"
-				);
-				strncat( stages, issues, sizeof( stages ) - strlen( stages ) - 1 );
-			}
-			gtk_label_set_text( GTK_LABEL( g_stageLabel ), stages );
-		}
-
 		clear_selected_image();
+		const bool hasDirectImage = load_image( selected, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
+		bool hasEditorImage = false;
+		if ( !hasDirectImage && !g_editorImageName.empty() ) {
+			hasEditorImage = load_image( g_editorImageName.c_str(), &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
+		}
 
 		// A shader name is not necessarily an image filename. Ask the shader
 		// system for its representative texture first, then decode that image
 		// into this plugin's own GL context.
-		const char* imageName = selected;
-		if ( g_ShadersTable.m_pfnShader_ForName_NoLoad != NULL ) {
+		const char* imageName = NULL;
+		if ( !hasDirectImage && !hasEditorImage && g_ShadersTable.m_pfnShader_ForName_NoLoad != NULL ) {
 			IShader* shader = g_ShadersTable.m_pfnShader_ForName_NoLoad( selected );
 			if ( shader != NULL && shader->getTexture() != NULL ) {
 				imageName = shader->getTexture()->name;
 			}
 		}
 
-		if ( imageName == NULL || imageName[0] == '\0' ) {
-			imageName = selected;
+		if ( !hasDirectImage && !hasEditorImage && imageName != NULL && imageName[0] != '\0' ) {
+			load_image( imageName, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
 		}
-		if ( !load_image( imageName, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight ) && imageName != selected ) {
-			load_image( selected, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
-		}
+		set_stage_label( hasDirectImage, hasEditorImage );
 	}
 	else {
 		gtk_label_set_text( GTK_LABEL( g_pSelectionLabel ), "No current shader selected — showing checkerboard" );
@@ -625,13 +745,7 @@ void ShaderShop_RefreshSelection(){
 		}
 	}
 
-	if ( g_pPreviewWidget != NULL ) {
-#if GTK_CHECK_VERSION( 3, 0, 0 )
-		gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
-#else
-		gtk_widget_queue_draw( g_pPreviewWidget );
-#endif
-	}
+	queue_preview_render();
 }
 
 static void ensure_checkerboard_texture(){
@@ -692,6 +806,11 @@ static void upload_texture( GLuint& texture, bool& uploaded, unsigned char* pixe
 }
 
 static bool stage_dimensions( const PreviewStage& stage, int& width, int& height ){
+	if ( stage.generatedLightmap ) {
+		// The white 1x1 is a compositing placeholder, not the material's
+		// geometry or display extent.
+		return false;
+	}
 	// Frames that failed to load are kept as placeholders to preserve frame
 	// numbering, so the first frame is not necessarily the first with an image.
 	for ( std::vector<AnimationFrame>::const_iterator frame = stage.animationFrames.begin(); frame != stage.animationFrames.end(); ++frame ) {
@@ -737,6 +856,10 @@ static float stage_wave( float base, float amplitude, float phase, float frequen
 	return base + amplitude * sinf( 6.28318530718f * ( phase + time * frequency ) );
 }
 
+static float preview_time(){
+	return g_animationClockFps > 0.0f ? static_cast<float>( g_animationTick ) / g_animationClockFps : 0.0f;
+}
+
 static void draw_preview(){
 	const int width = gtkutil_widget_get_width( g_pPreviewWidget );
 	const int height = gtkutil_widget_get_height( g_pPreviewWidget );
@@ -766,9 +889,22 @@ static void draw_preview(){
 
 	g_QglTable.m_pfn_qglMatrixMode( GL_PROJECTION );
 	g_QglTable.m_pfn_qglLoadIdentity();
-	g_QglTable.m_pfn_qglOrtho( 0, width, 0, height, -1, 1 );
+	if ( g_3dInspect ) {
+		const float aspect = static_cast<float>( width ) / static_cast<float>( height );
+		g_QglTable.m_pfn_qglOrtho( -aspect, aspect, -1, 1, -100, 100 );
+	}
+	else {
+		g_QglTable.m_pfn_qglOrtho( 0, width, 0, height, -1, 1 );
+	}
 	g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
 	g_QglTable.m_pfn_qglLoadIdentity();
+	if ( g_3dInspect ) {
+		const float fit = 2.0f * g_inspectZoom / static_cast<float>( std::max( width, height ) );
+		g_QglTable.m_pfn_qglTranslatef( g_inspectPanX, g_inspectPanY, 0.0f );
+		g_QglTable.m_pfn_qglRotatef( g_inspectPitch, 1.0f, 0.0f, 0.0f );
+		g_QglTable.m_pfn_qglRotatef( g_inspectYaw, 0.0f, 1.0f, 0.0f );
+		g_QglTable.m_pfn_qglScalef( fit, fit, fit );
+	}
 
 	int imageWidth = 0;
 	int imageHeight = 0;
@@ -817,17 +953,20 @@ static void draw_preview(){
 		g_QglTable.m_pfn_qglBlendFunc( blend_factor( stage->blendSrc ), blend_factor( stage->blendDst ) );
 		const float brightness = stage->rgbWave ? stage_wave( stage->rgbBase, stage->rgbAmplitude, stage->rgbPhase, stage->rgbFrequency ) : 1.0f;
 		g_QglTable.m_pfn_qglColor4f( brightness, brightness, brightness, 1.0f );
-		if ( stage->stretchWave ) {
+		if ( stage->stretchWave || stage->scroll ) {
 			const float stretch = stage_wave( stage->stretchBase, stage->stretchAmplitude, stage->stretchPhase, stage->stretchFrequency );
 			g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE );
 			g_QglTable.m_pfn_qglLoadIdentity();
-			g_QglTable.m_pfn_qglTranslatef( 0.5f, 0.5f, 0.0f );
-			g_QglTable.m_pfn_qglScalef( stretch, stretch, 1.0f );
-			g_QglTable.m_pfn_qglTranslatef( -0.5f, -0.5f, 0.0f );
+			if ( stage->scroll ) g_QglTable.m_pfn_qglTranslatef( stage->scrollS * preview_time(), stage->scrollT * preview_time(), 0.0f );
+			if ( stage->stretchWave ) {
+				g_QglTable.m_pfn_qglTranslatef( 0.5f, 0.5f, 0.0f );
+				g_QglTable.m_pfn_qglScalef( stretch, stretch, 1.0f );
+				g_QglTable.m_pfn_qglTranslatef( -0.5f, -0.5f, 0.0f );
+			}
 			g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
 		}
 		draw_textured_quad( texture, left, bottom, right, top );
-		if ( stage->stretchWave ) { g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE ); g_QglTable.m_pfn_qglLoadIdentity(); g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW ); }
+		if ( stage->stretchWave || stage->scroll ) { g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE ); g_QglTable.m_pfn_qglLoadIdentity(); g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW ); }
 		g_QglTable.m_pfn_qglColor4f( 1, 1, 1, 1 );
 		drewStage = true;
 	}
@@ -899,6 +1038,7 @@ static void preview_destroyed( GtkWidget*, gpointer ){
 	g_pSelectionLabel = NULL;
 	g_stageLabel = NULL;
 	g_animationButton = NULL;
+	g_3dInspectButton = NULL;
 	g_pPreviewWindow = NULL;
 }
 
@@ -912,8 +1052,63 @@ static void edit_shader_clicked( GtkButton*, gpointer ){
 	);
 }
 
-static void refresh_selection_clicked( GtkButton*, gpointer ){
+static gboolean refresh_selection_idle( gpointer ){
 	ShaderShop_RefreshSelection();
+	return FALSE;
+}
+
+static void refresh_selection_clicked( GtkButton*, gpointer ){
+	// Let the texture window finish its focus/selection update first. This
+	// avoids requiring a second click when ShaderShop already owns focus.
+	g_idle_add( refresh_selection_idle, NULL );
+}
+
+static void inspect_3d_toggled( GtkToggleButton* button, gpointer ){
+	g_3dInspect = gtk_toggle_button_get_active( button ) != FALSE;
+	queue_preview_render();
+}
+
+static gboolean preview_button_press( GtkWidget*, GdkEventButton* event, gpointer ){
+	if ( !g_3dInspect || ( event->button != 1 && event->button != 2 && event->button != 3 ) ) {
+		return FALSE;
+	}
+	g_pointerX = event->x;
+	g_pointerY = event->y;
+	return TRUE;
+}
+
+static gboolean preview_motion( GtkWidget* widget, GdkEventMotion* event, gpointer ){
+	if ( !g_3dInspect || ( event->state & ( GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK ) ) == 0 ) {
+		return FALSE;
+	}
+	const double dx = event->x - g_pointerX;
+	const double dy = event->y - g_pointerY;
+	g_pointerX = event->x;
+	g_pointerY = event->y;
+	if ( event->state & GDK_BUTTON1_MASK ) {
+		g_inspectYaw += static_cast<float>( dx ) * 0.5f;
+		g_inspectPitch += static_cast<float>( dy ) * 0.5f;
+		g_inspectPitch = std::max( -89.0f, std::min( 89.0f, g_inspectPitch ) );
+	}
+	else {
+		const int extent = std::max( 1, std::max( gtkutil_widget_get_width( widget ), gtkutil_widget_get_height( widget ) ) );
+		g_inspectPanX += static_cast<float>( dx ) * 2.0f / extent;
+		g_inspectPanY -= static_cast<float>( dy ) * 2.0f / extent;
+	}
+	queue_preview_render();
+	return TRUE;
+}
+
+static gboolean preview_scroll( GtkWidget*, GdkEventScroll* event, gpointer ){
+	if ( !g_3dInspect ) {
+		return FALSE;
+	}
+	if ( event->direction == GDK_SCROLL_UP ) g_inspectZoom *= 1.12f;
+	else if ( event->direction == GDK_SCROLL_DOWN ) g_inspectZoom /= 1.12f;
+	else return FALSE;
+	g_inspectZoom = std::max( 0.15f, std::min( 5.0f, g_inspectZoom ) );
+	queue_preview_render();
+	return TRUE;
 }
 
 void ShaderShop_Show(){
@@ -946,13 +1141,16 @@ void ShaderShop_Show(){
 	gtk_widget_show( frame );
 
 	g_pPreviewWidget = g_UIGtkTable.m_pfn_glwidget_new( FALSE, NULL );
-	gtk_widget_set_events( g_pPreviewWidget, GDK_EXPOSURE_MASK );
+	gtk_widget_set_events( g_pPreviewWidget, GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK );
 #if GTK_CHECK_VERSION( 3, 0, 0 )
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "render", G_CALLBACK( preview_render ), NULL );
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "realize", G_CALLBACK( preview_realized ), NULL );
 #else
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "expose-event", G_CALLBACK( preview_expose ), NULL );
 #endif
+	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "button-press-event", G_CALLBACK( preview_button_press ), NULL );
+	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "motion-notify-event", G_CALLBACK( preview_motion ), NULL );
+	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "scroll-event", G_CALLBACK( preview_scroll ), NULL );
 	gtk_container_add( GTK_CONTAINER( frame ), g_pPreviewWidget );
 	gtk_widget_set_hexpand( g_pPreviewWidget, TRUE );
 	gtk_widget_set_vexpand( g_pPreviewWidget, TRUE );
@@ -983,6 +1181,12 @@ void ShaderShop_Show(){
 	g_signal_connect( G_OBJECT( g_animationButton ), "clicked", G_CALLBACK( animation_clicked ), NULL );
 	gtk_box_pack_end( GTK_BOX( controls ), g_animationButton, FALSE, FALSE, 0 );
 	gtk_widget_show( g_animationButton );
+
+	g_3dInspectButton = gtk_toggle_button_new_with_label( "3D Inspect" );
+	gtk_widget_set_tooltip_text( g_3dInspectButton, "Left drag: orbit; right or middle drag: pan; wheel: zoom" );
+	g_signal_connect( G_OBJECT( g_3dInspectButton ), "toggled", G_CALLBACK( inspect_3d_toggled ), NULL );
+	gtk_box_pack_end( GTK_BOX( controls ), g_3dInspectButton, FALSE, FALSE, 0 );
+	gtk_widget_show( g_3dInspectButton );
 
 	GtkWidget* edit = gtk_button_new_with_label( "Edit Shader..." );
 	g_signal_connect( G_OBJECT( edit ), "clicked", G_CALLBACK( edit_shader_clicked ), NULL );
