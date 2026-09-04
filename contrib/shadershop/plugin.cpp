@@ -6,6 +6,7 @@
 
 _QERFuncTable_1 g_FuncTable;
 _QERShadersTable g_ShadersTable;
+_QERScripLibTable g_ScripLibTable;
 _QERQglTable g_QglTable;
 _QERUIGtkTable g_UIGtkTable;
 GtkWidget* g_pMainWidget = NULL;
@@ -65,7 +66,11 @@ extern "C" CSynapseClient* SYNAPSE_DLL_EXPORT Synapse_EnumerateInterfaces( const
 
 	g_SynapseClient.AddAPI( PLUGIN_MAJOR, SHADERSHOP_MINOR, sizeof( _QERPluginTable ) );
 	g_SynapseClient.AddAPI( RADIANT_MAJOR, NULL, sizeof( _QERFuncTable_1 ), SYN_REQUIRE, &g_FuncTable );
-	g_SynapseClient.AddAPI( SHADERS_MAJOR, "*", sizeof( _QERShadersTable ), SYN_REQUIRE_ANY, &g_ShadersTable );
+	// SYN_REQUIRE_ANY is an internal Synapse resolver type, not a valid client
+	// registration type. Use the normal wildcard requirement, as the other
+	// shader-consuming modules do, so the table is actually populated.
+	g_SynapseClient.AddAPI( SHADERS_MAJOR, "*", sizeof( _QERShadersTable ), SYN_REQUIRE, &g_ShadersTable );
+	g_SynapseClient.AddAPI( SCRIPLIB_MAJOR, NULL, sizeof( _QERScripLibTable ), SYN_REQUIRE, &g_ScripLibTable );
 	g_SynapseClient.AddAPI( QGL_MAJOR, NULL, sizeof( _QERQglTable ), SYN_REQUIRE, &g_QglTable );
 	g_SynapseClient.AddAPI( UIGTK_MAJOR, NULL, sizeof( _QERUIGtkTable ), SYN_REQUIRE, &g_UIGtkTable );
 

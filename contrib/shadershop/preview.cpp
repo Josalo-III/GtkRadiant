@@ -8,8 +8,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
+#include <cstdarg>
+#include <cstring>
 #include <cstdlib>
-#include <sstream>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -41,33 +44,69 @@ struct AnimationFrame
 	AnimationFrame() : pixels( NULL ), width( 0 ), height( 0 ), texture( 0 ), uploaded( false ) {}
 };
 
+// The engine stores a fixed number of animation frames per stage.
+static const size_t ANIMATION_FRAME_LIMIT = 8;
+
 struct PreviewStage
 {
 	std::string mapName;
 	std::string blendSrc;
 	std::string blendDst;
+	bool clamp;
 	unsigned char* pixels;
 	int width;
 	int height;
 	GLuint texture;
 	bool uploaded;
 	float animationFps;
+	bool rgbWave;
+	bool stretchWave;
+	float rgbBase, rgbAmplitude, rgbPhase, rgbFrequency;
+	float stretchBase, stretchAmplitude, stretchPhase, stretchFrequency;
 	std::vector<std::string> animationNames;
 	std::vector<AnimationFrame> animationFrames;
 
 	PreviewStage() :
 		blendSrc( "GL_SRC_ALPHA" ),
 		blendDst( "GL_ONE_MINUS_SRC_ALPHA" ),
+		clamp( false ),
 		pixels( NULL ),
 		width( 0 ),
 		height( 0 ),
 		texture( 0 ),
 		uploaded( false ),
-		animationFps( 0.0f )
+		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ),
+		rgbBase( 1.0f ), rgbAmplitude( 0.0f ), rgbPhase( 0.0f ), rgbFrequency( 0.0f ),
+		stretchBase( 1.0f ), stretchAmplitude( 0.0f ), stretchPhase( 0.0f ), stretchFrequency( 0.0f )
 	{}
 };
 
 static std::vector<PreviewStage> g_stages;
+
+// Parse and load diagnostics for the current selection. Malformed or
+// unsupported source is tolerated rather than fatal, but it is never silent:
+// unreported tolerance is indistinguishable from a preview that is simply
+// wrong.
+static std::vector<std::string> g_diagnostics;
+
+static const size_t DIAGNOSTIC_PRINT_LIMIT = 20;
+
+static void shadershop_warn( const char* format, ... ){
+	char text[512];
+	va_list args;
+	va_start( args, format );
+	vsnprintf( text, sizeof( text ), format, args );
+	va_end( args );
+
+	g_diagnostics.push_back( text );
+	if ( g_diagnostics.size() <= DIAGNOSTIC_PRINT_LIMIT ) {
+		g_FuncTable.m_pfnSysFPrintf( SYS_WRN, "ShaderShop: %s\n", text );
+	}
+	else if ( g_diagnostics.size() == DIAGNOSTIC_PRINT_LIMIT + 1 ) {
+		g_FuncTable.m_pfnSysFPrintf( SYS_WRN, "ShaderShop: further diagnostics suppressed\n" );
+	}
+}
+
 static guint g_animationTimer = 0;
 static unsigned int g_animationTick = 0;
 static float g_animationClockFps = 0.0f;
@@ -91,34 +130,165 @@ static void clear_stages(){
 	g_animationClockFps = 0.0f;
 }
 
+// The image manager reports failure by leaving the pixel pointer null, but a
+// loader can also hand back a buffer with no usable dimensions. Treat both as
+// failure, and never keep a buffer we would not draw.
+static bool load_image( const char* name, unsigned char** pixels, int* width, int* height ){
+	*pixels = NULL;
+	*width = 0;
+	*height = 0;
+
+	g_FuncTable.m_pfnLoadImage( name, pixels, width, height );
+
+	// Shader files commonly name a .tga while a mod ships the same asset as a
+	// different supported format. With an explicit extension Radiant tries only
+	// that loader; retrying the extensionless VFS path lets its image manager
+	// search the installed formats without bypassing the VFS.
+	if ( *pixels == NULL ) {
+		std::string extensionless( name );
+		const std::string::size_type dot = extensionless.find_last_of( '.' );
+		const std::string::size_type slash = extensionless.find_last_of( "/\\" );
+		if ( dot != std::string::npos && ( slash == std::string::npos || dot > slash ) ) {
+			extensionless.erase( dot );
+			g_FuncTable.m_pfnLoadImage( extensionless.c_str(), pixels, width, height );
+		}
+	}
+
+	if ( *pixels != NULL && ( *width <= 0 || *height <= 0 ) ) {
+		g_free( *pixels );
+		*pixels = NULL;
+	}
+	if ( *pixels == NULL ) {
+		*width = 0;
+		*height = 0;
+		return false;
+	}
+	return true;
+}
+
 static void load_stage_images(){
 	g_animationClockFps = 0.0f;
 
+	int stageNumber = 0;
 	for ( std::vector<PreviewStage>::iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) {
+		++stageNumber;
+
 		if ( !stage->animationNames.empty() ) {
+			// A frame that fails to load is retained as an empty placeholder.
+			// Dropping it would renumber every later frame and silently change
+			// both the length and the content of the animation.
+			size_t loaded = 0;
 			for ( std::vector<std::string>::const_iterator name = stage->animationNames.begin(); name != stage->animationNames.end(); ++name ) {
 				AnimationFrame frame;
 				frame.name = *name;
-				g_FuncTable.m_pfnLoadImage( name->c_str(), &frame.pixels, &frame.width, &frame.height );
-				if ( frame.pixels != NULL && frame.width > 0 && frame.height > 0 ) {
-					stage->animationFrames.push_back( frame );
+				if ( load_image( name->c_str(), &frame.pixels, &frame.width, &frame.height ) ) {
+					++loaded;
 				}
+				else {
+					shadershop_warn(
+						"stage %d: animation frame %d ('%s') could not be loaded",
+						stageNumber, static_cast<int>( stage->animationFrames.size() ) + 1, name->c_str()
+					);
+				}
+				stage->animationFrames.push_back( frame );
 			}
 
+			if ( loaded == 0 ) {
+				shadershop_warn( "stage %d: no animation frame could be loaded", stageNumber );
+			}
 			if ( stage->animationFrames.size() > 1 && stage->animationFps > g_animationClockFps ) {
 				g_animationClockFps = stage->animationFps;
 			}
 		}
 		else if ( !stage->mapName.empty() ) {
-			g_FuncTable.m_pfnLoadImage( stage->mapName.c_str(), &stage->pixels, &stage->width, &stage->height );
+			if ( !load_image( stage->mapName.c_str(), &stage->pixels, &stage->width, &stage->height ) ) {
+				// Special sources are understood but not yet representable, and
+				// are reported as such rather than as a missing file.
+				if ( !strcasecmp( stage->mapName.c_str(), "$lightmap" ) ) {
+					// A real lightmap is baked per surface and unavailable on this
+					// standalone quad. White is the neutral input for the common
+					// filter lightmap stage, preserving the material's base image.
+					stage->pixels = static_cast<unsigned char*>( g_malloc( 4 ) );
+					stage->pixels[0] = stage->pixels[1] = stage->pixels[2] = stage->pixels[3] = 255;
+					stage->width = stage->height = 1;
+				}
+				else if ( stage->mapName[0] == '$' ) {
+					shadershop_warn(
+						"stage %d: '%s' is not previewable in a bare material context",
+						stageNumber, stage->mapName.c_str()
+					);
+				}
+				else {
+					shadershop_warn( "stage %d: image '%s' could not be loaded", stageNumber, stage->mapName.c_str() );
+				}
+			}
 		}
+		else {
+			shadershop_warn( "stage %d: no image source", stageNumber );
+		}
+		if ( stage->rgbWave || stage->stretchWave ) g_animationClockFps = std::max( g_animationClockFps, 30.0f );
 	}
 }
 
+// =============================================================================
+// SCRIPT LIB TOKEN ADAPTATION
+//
+// Lexing is deliberately delegated to Radiant.  ScriptLib owns comments,
+// quotes, delimiters and line accounting; ShaderShop only groups its tokens
+// into the selected definition and its stages.
+
+static bool next_script_token( std::string& result ){
+	if ( !g_ScripLibTable.m_pfnGetToken( true ) ) {
+		return false;
+	}
+	result = g_ScripLibTable.m_pfnToken();
+	return true;
+}
+
+// GetToken(false) emits warnings after it has crossed a line instead of being a
+// hard line boundary.  Observe ScriptLib's line counter and use its one-token
+// pushback to keep the next directive available to the caller.
+static bool next_script_token_on_line( int line, std::string& result ){
+	if ( !next_script_token( result ) ) {
+		return false;
+	}
+	if ( g_ScripLibTable.m_pfnScriptLine() != line || result == "{" || result == "}" ) {
+		g_ScripLibTable.m_pfnUnGetToken();
+		return false;
+	}
+	return true;
+}
+
+// Shader keywords are not case sensitive (shader manual 2.3). Texture paths
+// are case sensitive on unix (2.2), so this is used for directive names only.
+static bool keyword_equals( const std::string& token, const char* keyword ){
+	std::string::size_type i = 0;
+	for ( ; i < token.size() && keyword[i] != '\0'; ++i ) {
+		if ( tolower( static_cast<unsigned char>( token[i] ) ) != tolower( static_cast<unsigned char>( keyword[i] ) ) ) {
+			return false;
+		}
+	}
+	return i == token.size() && keyword[i] == '\0';
+}
+
+// Radiant resolves shader names case-insensitively (Shader_ForName uses
+// stricmp) while storing the spelling found in the file, so the selected name
+// is compared the same way.
+static bool name_equals( const std::string& token, const char* name ){
+	return keyword_equals( token, name );
+}
+
+// =============================================================================
+// SELECTED SHADER PARSING
+
 static void parse_selected_stages( const char* shaderName ){
 	clear_stages();
+	g_diagnostics.clear();
 
-	if ( shaderName == NULL || g_ShadersTable.m_pfnShader_ForName_NoLoad == NULL || g_FuncTable.m_pfnLoadFile == NULL ) {
+	if ( shaderName == NULL || g_ShadersTable.m_pfnShader_ForName_NoLoad == NULL || g_FuncTable.m_pfnLoadFile == NULL ||
+		 g_ScripLibTable.m_pfnStartTokenParsing == NULL || g_ScripLibTable.m_pfnGetToken == NULL ||
+		 g_ScripLibTable.m_pfnToken == NULL || g_ScripLibTable.m_pfnScriptLine == NULL ||
+		 g_ScripLibTable.m_pfnUnGetToken == NULL ) {
 		return;
 	}
 
@@ -135,117 +305,167 @@ static void parse_selected_stages( const char* shaderName ){
 		return;
 	}
 
-	const char* text = static_cast<const char*>( buffer );
-	const char* end = text + size;
-	int shaderDepth = 0;
+	g_ScripLibTable.m_pfnStartTokenParsing( static_cast<char*>( buffer ) );
+	int depth = 0;
 	int currentStage = -1;
 	bool inShader = false;
+	bool shaderClosed = false;
 
-	for ( const char* p = text; p < end; ) {
-		while ( p < end && ( *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ) ) {
-			++p;
+	for (;;) {
+		std::string token;
+		if ( !next_script_token( token ) ) {
+			break;
 		}
 
-		const char* token = p;
-		while ( p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '{' && *p != '}' ) {
-			++p;
-		}
-
-		if ( p == token ) {
-			if ( p < end ) {
-				if ( *p == '{' ) {
-					++shaderDepth;
-					if ( inShader && shaderDepth == 2 ) {
-						g_stages.push_back( PreviewStage() );
-						currentStage = static_cast<int>( g_stages.size() ) - 1;
-					}
-				}
-				else if ( *p == '}' ) {
-					if ( inShader && shaderDepth == 2 ) {
-						currentStage = -1;
-					}
-					if ( shaderDepth > 0 ) {
-						--shaderDepth;
-					}
-					if ( inShader && shaderDepth == 0 ) {
-						++p;
-						break;
-					}
-				}
-				++p;
+		if ( token == "{" ) {
+			++depth;
+			if ( inShader && depth == 2 ) {
+				g_stages.push_back( PreviewStage() );
+				currentStage = static_cast<int>( g_stages.size() ) - 1;
 			}
 			continue;
 		}
 
-		const std::string word( token, p - token );
-		if ( !inShader && word == shaderName ) {
-			inShader = true;
+		if ( token == "}" ) {
+			if ( depth > 0 ) {
+				--depth;
+			}
+			if ( inShader && depth == 1 ) {
+				currentStage = -1;
+			}
+			else if ( inShader && depth == 0 ) {
+				// The selected shader's outer closing brace is a hard boundary.
+				shaderClosed = true;
+				break;
+			}
 			continue;
 		}
 
-		if ( !inShader || shaderDepth != 2 || currentStage < 0 ) {
+		if ( !inShader ) {
+			// A shader name is a definition header only at depth zero. Matching
+			// it inside an earlier shader's body — where the same name often
+			// appears as a map or qer_editorimage argument — would parse that
+			// neighbour's stages instead.
+			if ( depth == 0 && name_equals( token, shaderName ) ) {
+				inShader = true;
+			}
+			continue;
+		}
+
+		if ( depth != 2 || currentStage < 0 ) {
 			continue;
 		}
 
 		PreviewStage& stage = g_stages[currentStage];
 
-		if ( word == "map" || word == "clampmap" ) {
-			while ( p < end && ( *p == ' ' || *p == '\t' ) ) {
-				++p;
+		const int stageNumber = currentStage + 1;
+		const int directiveLine = g_ScripLibTable.m_pfnScriptLine();
+
+		if ( keyword_equals( token, "map" ) || keyword_equals( token, "clampmap" ) ) {
+			std::string name;
+			if ( !next_script_token_on_line( directiveLine, name ) ) {
+				shadershop_warn( "stage %d: '%s' has no argument", stageNumber, token.c_str() );
 			}
-			const char* source = p;
-			while ( p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '}' ) {
-				++p;
-			}
-			if ( p > source ) {
-				stage.mapName.assign( source, p - source );
+			else {
+				if ( !stage.mapName.empty() ) {
+					shadershop_warn(
+						"stage %d: image source replaced ('%s' after '%s')",
+						stageNumber, name.c_str(), stage.mapName.c_str()
+					);
+				}
+				stage.mapName = name;
+				stage.clamp = keyword_equals( token, "clampmap" );
 			}
 		}
-		else if ( word == "animMap" ) {
-			while ( p < end && ( *p == ' ' || *p == '\t' ) ) {
-				++p;
+		else if ( keyword_equals( token, "animMap" ) ) {
+			std::string rate;
+			if ( !next_script_token_on_line( directiveLine, rate ) ) {
+				shadershop_warn( "stage %d: animMap has no frequency", stageNumber );
+			}
+			stage.animationFps = static_cast<float>( atof( rate.c_str() ) );
+
+			for (;;) {
+				std::string frame;
+				if ( !next_script_token_on_line( directiveLine, frame ) ) {
+					break;
+				}
+				stage.animationNames.push_back( frame );
 			}
 
-			const char* rate = p;
-			while ( p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '}' ) {
-				++p;
+			if ( stage.animationNames.size() < 2 ) {
+				shadershop_warn(
+					"stage %d: animMap lists %d frames; needs at least two to animate",
+					stageNumber, static_cast<int>( stage.animationNames.size() )
+				);
 			}
-			stage.animationFps = static_cast<float>( atof( std::string( rate, p - rate ).c_str() ) );
-
-			const char* framesEnd = p;
-			while ( framesEnd < end && *framesEnd != '\n' && *framesEnd != '\r' && *framesEnd != '}' ) {
-				++framesEnd;
+			else if ( stage.animationNames.size() > ANIMATION_FRAME_LIMIT ) {
+				// The engine stores a fixed eight frames per stage. Preview them
+				// all rather than truncate, but the surplus will not play in game.
+				shadershop_warn(
+					"stage %d: animMap lists %d frames; the engine plays only the first %d",
+					stageNumber, static_cast<int>( stage.animationNames.size() ),
+					static_cast<int>( ANIMATION_FRAME_LIMIT )
+				);
 			}
-			std::istringstream frames( std::string( p, framesEnd - p ) );
-			std::string frameName;
-			while ( frames >> frameName ) {
-				stage.animationNames.push_back( frameName );
+			if ( stage.animationFps <= 0.0f ) {
+				shadershop_warn( "stage %d: animMap frequency '%s' is not a positive rate", stageNumber, rate.c_str() );
 			}
-			p = framesEnd;
 		}
-		else if ( word == "blendFunc" ) {
-			while ( p < end && ( *p == ' ' || *p == '\t' ) ) {
-				++p;
+		else if ( keyword_equals( token, "blendFunc" ) ) {
+			std::string src;
+			std::string dst;
+			if ( !next_script_token_on_line( directiveLine, src ) ) {
+				shadershop_warn( "stage %d: blendFunc has no arguments", stageNumber );
 			}
-			const char* source = p;
-			while ( p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '}' ) {
-				++p;
+			else if ( !next_script_token_on_line( directiveLine, dst ) ) {
+				if ( keyword_equals( src, "add" ) ) {
+					stage.blendSrc = "GL_ONE";
+					stage.blendDst = "GL_ONE";
+				}
+				else if ( keyword_equals( src, "filter" ) ) {
+					stage.blendSrc = "GL_DST_COLOR";
+					stage.blendDst = "GL_ZERO";
+				}
+				else if ( keyword_equals( src, "blend" ) ) {
+					stage.blendSrc = "GL_SRC_ALPHA";
+					stage.blendDst = "GL_ONE_MINUS_SRC_ALPHA";
+				}
+				else {
+					shadershop_warn( "stage %d: unknown blendFunc shorthand '%s'", stageNumber, src.c_str() );
+				}
 			}
-			const std::string src( source, p - source );
-
-			while ( p < end && ( *p == ' ' || *p == '\t' ) ) {
-				++p;
-			}
-			const char* destination = p;
-			while ( p < end && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != '}' ) {
-				++p;
-			}
-
-			if ( !src.empty() && p > destination ) {
+			else {
 				stage.blendSrc = src;
-				stage.blendDst.assign( destination, p - destination );
+				stage.blendDst = dst;
 			}
 		}
+		else if ( keyword_equals( token, "rgbGen" ) || keyword_equals( token, "tcMod" ) ) {
+			const bool isRgb = keyword_equals( token, "rgbGen" );
+			std::string mode;
+			if ( !next_script_token_on_line( directiveLine, mode ) || !keyword_equals( mode, isRgb ? "wave" : "stretch" ) ) continue;
+			std::string wave, base, amplitude, phase, frequency;
+			if ( !next_script_token_on_line( directiveLine, wave ) || !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
+				shadershop_warn( "stage %d: incomplete %s %s", stageNumber, token.c_str(), mode.c_str() );
+				continue;
+			}
+			if ( !keyword_equals( wave, "sin" ) && !keyword_equals( wave, "square" ) ) { shadershop_warn( "stage %d: wave '%s' is not supported yet", stageNumber, wave.c_str() ); continue; }
+			const float b = static_cast<float>( atof( base.c_str() ) ), a = static_cast<float>( atof( amplitude.c_str() ) ), p = static_cast<float>( atof( phase.c_str() ) ), f = static_cast<float>( atof( frequency.c_str() ) );
+			if ( isRgb ) { stage.rgbWave = true; stage.rgbBase = b; stage.rgbAmplitude = a; stage.rgbPhase = p; stage.rgbFrequency = f; }
+			else { stage.stretchWave = true; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f; }
+		}
+	}
+
+	if ( !inShader ) {
+		shadershop_warn(
+			"'%s' was not found at the top level of %s",
+			shaderName, shader->getShaderFileName()
+		);
+	}
+	else if ( !shaderClosed ) {
+		shadershop_warn(
+			"'%s' reaches end of file without a closing brace",
+			shaderName
+		);
 	}
 
 	g_free( buffer );
@@ -337,7 +557,7 @@ void ShaderShop_RefreshSelection(){
 		}
 
 		if ( g_stageLabel != NULL ) {
-			char stages[128];
+			char stages[192];
 			if ( !g_stages.empty() ) {
 				snprintf(
 					stages,
@@ -349,6 +569,20 @@ void ShaderShop_RefreshSelection(){
 			}
 			else {
 				snprintf( stages, sizeof( stages ), "Parsed stages: 0 (shader API/file unavailable)" );
+			}
+
+			// Tolerated problems are reported here as well as on the console, so
+			// a wrong-looking preview can be told apart from a correct one.
+			if ( !g_diagnostics.empty() ) {
+				char issues[64];
+				snprintf(
+					issues,
+					sizeof( issues ),
+					" — %d issue%s, see console",
+					static_cast<int>( g_diagnostics.size() ),
+					g_diagnostics.size() == 1 ? "" : "s"
+				);
+				strncat( stages, issues, sizeof( stages ) - strlen( stages ) - 1 );
 			}
 			gtk_label_set_text( GTK_LABEL( g_stageLabel ), stages );
 		}
@@ -366,15 +600,18 @@ void ShaderShop_RefreshSelection(){
 			}
 		}
 
-		g_FuncTable.m_pfnLoadImage( imageName, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
-		if ( g_selectedPixels == NULL && imageName != selected ) {
-			g_FuncTable.m_pfnLoadImage( selected, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
+		if ( imageName == NULL || imageName[0] == '\0' ) {
+			imageName = selected;
+		}
+		if ( !load_image( imageName, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight ) && imageName != selected ) {
+			load_image( selected, &g_selectedPixels, &g_selectedWidth, &g_selectedHeight );
 		}
 	}
 	else {
 		gtk_label_set_text( GTK_LABEL( g_pSelectionLabel ), "No current shader selected — showing checkerboard" );
 		clear_stages();
 		clear_selected_image();
+		g_diagnostics.clear();
 
 		if ( g_animationTimer != 0 ) {
 			g_source_remove( g_animationTimer );
@@ -425,18 +662,21 @@ static void ensure_checkerboard_texture(){
 }
 
 static GLenum blend_factor( const std::string& factor ){
-	if ( factor == "GL_ONE" || factor == "one" ) return GL_ONE;
-	if ( factor == "GL_ZERO" || factor == "zero" ) return GL_ZERO;
-	if ( factor == "GL_DST_COLOR" || factor == "dst_color" ) return GL_DST_COLOR;
-	if ( factor == "GL_ONE_MINUS_DST_COLOR" || factor == "one_minus_dst_color" ) return GL_ONE_MINUS_DST_COLOR;
-	if ( factor == "GL_SRC_ALPHA" || factor == "src_alpha" ) return GL_SRC_ALPHA;
-	if ( factor == "GL_ONE_MINUS_SRC_ALPHA" || factor == "one_minus_src_alpha" ) return GL_ONE_MINUS_SRC_ALPHA;
-	if ( factor == "GL_DST_ALPHA" || factor == "dst_alpha" ) return GL_DST_ALPHA;
-	if ( factor == "GL_ONE_MINUS_DST_ALPHA" || factor == "one_minus_dst_alpha" ) return GL_ONE_MINUS_DST_ALPHA;
+	std::string value = factor;
+	for ( std::string::iterator i = value.begin(); i != value.end(); ++i ) *i = tolower( static_cast<unsigned char>( *i ) );
+	if ( value.compare( 0, 3, "gl_" ) == 0 ) value.erase( 0, 3 );
+	if ( value == "one" ) return GL_ONE;
+	if ( value == "zero" ) return GL_ZERO;
+	if ( value == "dst_color" ) return GL_DST_COLOR;
+	if ( value == "one_minus_dst_color" ) return GL_ONE_MINUS_DST_COLOR;
+	if ( value == "src_alpha" ) return GL_SRC_ALPHA;
+	if ( value == "one_minus_src_alpha" ) return GL_ONE_MINUS_SRC_ALPHA;
+	if ( value == "dst_alpha" ) return GL_DST_ALPHA;
+	if ( value == "one_minus_dst_alpha" ) return GL_ONE_MINUS_DST_ALPHA;
 	return GL_SRC_ALPHA;
 }
 
-static void upload_texture( GLuint& texture, bool& uploaded, unsigned char* pixels, int width, int height ){
+static void upload_texture( GLuint& texture, bool& uploaded, unsigned char* pixels, int width, int height, bool clamp = false ){
 	if ( pixels == NULL || uploaded ) {
 		return;
 	}
@@ -445,17 +685,21 @@ static void upload_texture( GLuint& texture, bool& uploaded, unsigned char* pixe
 	g_QglTable.m_pfn_qglBindTexture( GL_TEXTURE_2D, texture );
 	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
 	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT );
-	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT );
+	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	g_QglTable.m_pfn_qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT );
 	g_QglTable.m_pfn_qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
 	uploaded = true;
 }
 
 static bool stage_dimensions( const PreviewStage& stage, int& width, int& height ){
-	if ( !stage.animationFrames.empty() ) {
-		width = stage.animationFrames.front().width;
-		height = stage.animationFrames.front().height;
-		return true;
+	// Frames that failed to load are kept as placeholders to preserve frame
+	// numbering, so the first frame is not necessarily the first with an image.
+	for ( std::vector<AnimationFrame>::const_iterator frame = stage.animationFrames.begin(); frame != stage.animationFrames.end(); ++frame ) {
+		if ( frame->pixels != NULL && frame->width > 0 && frame->height > 0 ) {
+			width = frame->width;
+			height = frame->height;
+			return true;
+		}
 	}
 	if ( stage.pixels != NULL && stage.width > 0 && stage.height > 0 ) {
 		width = stage.width;
@@ -488,6 +732,11 @@ static void draw_textured_quad( GLuint texture, float left, float bottom, float 
 	g_QglTable.m_pfn_qglEnd();
 }
 
+static float stage_wave( float base, float amplitude, float phase, float frequency ){
+	const float time = g_animationClockFps > 0.0f ? static_cast<float>( g_animationTick ) / g_animationClockFps : 0.0f;
+	return base + amplitude * sinf( 6.28318530718f * ( phase + time * frequency ) );
+}
+
 static void draw_preview(){
 	const int width = gtkutil_widget_get_width( g_pPreviewWidget );
 	const int height = gtkutil_widget_get_height( g_pPreviewWidget );
@@ -504,7 +753,7 @@ static void draw_preview(){
 			}
 		}
 		else {
-			upload_texture( stage->texture, stage->uploaded, stage->pixels, stage->width, stage->height );
+			upload_texture( stage->texture, stage->uploaded, stage->pixels, stage->width, stage->height, stage->clamp );
 		}
 	}
 
@@ -566,7 +815,20 @@ static void draw_preview(){
 
 		g_QglTable.m_pfn_qglEnable( GL_BLEND );
 		g_QglTable.m_pfn_qglBlendFunc( blend_factor( stage->blendSrc ), blend_factor( stage->blendDst ) );
+		const float brightness = stage->rgbWave ? stage_wave( stage->rgbBase, stage->rgbAmplitude, stage->rgbPhase, stage->rgbFrequency ) : 1.0f;
+		g_QglTable.m_pfn_qglColor4f( brightness, brightness, brightness, 1.0f );
+		if ( stage->stretchWave ) {
+			const float stretch = stage_wave( stage->stretchBase, stage->stretchAmplitude, stage->stretchPhase, stage->stretchFrequency );
+			g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE );
+			g_QglTable.m_pfn_qglLoadIdentity();
+			g_QglTable.m_pfn_qglTranslatef( 0.5f, 0.5f, 0.0f );
+			g_QglTable.m_pfn_qglScalef( stretch, stretch, 1.0f );
+			g_QglTable.m_pfn_qglTranslatef( -0.5f, -0.5f, 0.0f );
+			g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
+		}
 		draw_textured_quad( texture, left, bottom, right, top );
+		if ( stage->stretchWave ) { g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE ); g_QglTable.m_pfn_qglLoadIdentity(); g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW ); }
+		g_QglTable.m_pfn_qglColor4f( 1, 1, 1, 1 );
 		drewStage = true;
 	}
 

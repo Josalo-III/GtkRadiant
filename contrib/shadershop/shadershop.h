@@ -11,6 +11,7 @@
 #include "iplugin.h"
 #include "qerplugin.h"
 #include "ishaders.h"
+#include "iscriplib.h"
 #include "igl.h"
 #include "iui_gtk.h"
 
@@ -18,6 +19,7 @@
 
 extern _QERFuncTable_1 g_FuncTable;
 extern _QERShadersTable g_ShadersTable;
+extern _QERScripLibTable g_ScripLibTable;
 extern _QERQglTable g_QglTable;
 extern _QERUIGtkTable g_UIGtkTable;
 extern GtkWidget* g_pMainWidget;
