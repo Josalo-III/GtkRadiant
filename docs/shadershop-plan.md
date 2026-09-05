@@ -13,6 +13,12 @@ small, portable preview and authoring workflow backed by normal `.shader`
 files, integrated with GtkRadiant's own VFS, image-loading, plugin, GTK, and
 OpenGL facilities.
 
+ShaderShop has two standing obligations that outrank feature count:
+**defer to Radiant for language**, and **keep the preview honest about what it
+is showing**. The first is covered by the authority hierarchy below. The second
+is covered by the compositing-isolation rules, which are new in this revision
+and currently the module's largest source of visibly wrong output.
+
 The target language is the original Quake III shader language, but ShaderShop
 does not define that language for itself. **Radiant's own parser and shader
 consumers are the executable specification for this module.** ShaderShop should
@@ -125,7 +131,15 @@ synchronously and non-reentrantly:
   use ScriptLib;
 - do not parse two shader sources concurrently;
 - keep the source buffer alive for the whole parse;
-- use `UnGetToken` only as the single-token pushback mechanism it actually is.
+- use `UnGetToken` only as the single-token pushback mechanism it actually is;
+- **do not leave ScriptLib's cursor pointing into a buffer you are about to
+  free.** `parse_selected_stages` calls `StartTokenParsing( buffer )` and then
+  `g_free( buffer )`; `script_p` in `radiant/parse.cpp` is a file-scope global
+  that still references it. Nothing reads it before the next
+  `StartTokenParsing`, so this is not biting today, but ScriptLib is a
+  process-wide singleton and leaving a dangling cursor in shared state is a
+  landmine for every other consumer. Re-point it at a static empty string
+  before releasing the buffer.
 
 Where ShaderShop needs a line-scoped argument list, do not scan the source text
 independently. Use ScriptLib's line state. In particular, `GetToken( false )`
@@ -360,10 +374,32 @@ textures are not borrowed from or shared with Radiant's main context. CPU image
 decoding may occur outside the GL callback, but texture creation, upload, and
 deletion must occur while the preview context is current.
 
-On GTK 3, request the first render after realization and again from an idle
-callback after mapping. A pre-realize render request can be discarded. Any idle
-callback must consult the current live preview widget rather than retain a
-destroyed widget pointer.
+On GTK 3, the first frame is driven by `GtkGLArea`'s **`resize`** signal, which
+is emitted when the area creates or resizes its own framebuffer and carries the
+real buffer dimensions. That is the earliest point at which the surface is
+genuinely drawable, which makes it the correct trigger — realize and map both
+happen too early to be relied on, and a render request issued before the buffer
+exists is discarded.
+
+**Do not size the viewport from the widget allocation.** `gtk_widget_get_allocation`
+is not the GL buffer: it is unset until the first size-allocate and takes no
+account of the window scale factor. Sizing from it meant an early render found
+zero dimensions, returned without drawing, and left the buffer undefined — and
+because `GtkGLArea` does not repaint on its own, a render that draws nothing and
+queues nothing leaves the window blank until unrelated damage arrives. The
+symptom was a preview that opened as a featureless rectangle until the window
+was resized by its corner.
+
+Two rules follow, and they generalise beyond this widget:
+
+- **Never return from a render callback without clearing.** An undrawn buffer is
+  undefined, not empty.
+- **A frame that could not draw must queue another**, under a bounded retry
+  count. Unbounded re-queueing spins a core when the surface never becomes
+  drawable, which is worse than the blank frame it was meant to fix.
+
+Any idle callback must consult the current live preview widget rather than
+retain a destroyed widget pointer.
 
 **GTK 2 must actually compile.** The compatibility policy below keeps GTK 2 as
 the Windows path, but the current preview calls `gtk_widget_set_hexpand` and
@@ -436,6 +472,15 @@ in the window.
 Parser diagnostics produced by Radiant itself should not be duplicated with a
 second ShaderShop lexical diagnostic system.
 
+**Accepting a directive and then rendering something else is the worst
+outcome available.** It is worse than rejecting the directive, because the
+diagnostics stay silent and the preview looks authoritative. The current
+`rgbGen wave` and `tcMod stretch` handling validates both `sin` and `square`,
+stores neither, and evaluates everything through `sinf` — a `square` wave is
+recognised, accepted, and quietly drawn as a sine. Either carry the waveform
+through to evaluation or report it as unsupported; there is no third option
+that keeps the preview honest.
+
 Two consequences remain important:
 
 - **A failed animation frame is retained as an empty placeholder.** Dropping it
@@ -444,9 +489,8 @@ Two consequences remain important:
   resolve a legal Radiant token sequence into a preview state, it should report
   that state as unsupported rather than silently substitute a plausible one.
 
-The stage summary must also stop collapsing unrelated failures into
-`Parsed stages: 0 (shader API/file unavailable)`. Source acquisition and parsing
-should distinguish at least:
+The stage summary must not collapse unrelated failures into one message.
+Source acquisition and parsing should distinguish at least:
 
 ```text
 no current shader
@@ -458,8 +502,348 @@ selected definition not found in loaded source
 selected definition parsed with zero stages
 ```
 
-That distinction is especially important while the current zero-stage problem
-is being diagnosed.
+**Status:** implemented as `ShaderSourceState`. The status line now separates a
+raw image with no `.shader` definition from a definition that failed to parse,
+from source that could not be acquired. This was the right split and should be
+extended rather than flattened as new failure modes appear.
+
+## Compositing isolation
+
+A shader stage stack is a sequence of blend operations against a destination.
+The preview therefore has to be careful about *what the destination is*, because
+several `blendFunc` factors read it. If the preview's own scaffolding is sitting
+in that destination, the scaffolding becomes an operand and the material is
+composited against something that does not exist in the game.
+
+Two rules follow. Both are currently violated, and together they are the reason
+the preview washes out.
+
+### The checkerboard is presentation, never an operand
+
+The checkerboard exists so a human can see transparency. It has no shader
+meaning. But the current renderer draws it into the same buffer the stages then
+composite against, so every destination-reading factor multiplies it into the
+result:
+
+```text
+GL_DST_COLOR   GL_ONE_MINUS_DST_COLOR   GL_DST_ALPHA   GL_ONE_MINUS_DST_ALPHA
+```
+
+`blendFunc filter` — `GL_DST_COLOR GL_ZERO` — is one of the most common
+directives in the language. Measured over the corpus:
+
+```text
+shader definitions                                        9654
+  containing a destination-reading blend factor           4055   42.0%
+```
+
+Two in five shipped shaders currently multiply a 176/72 grey checker pattern
+into their own material. The checker squares are not subtle; at 0.69 and 0.28
+they change both the brightness and the pattern of the result.
+
+The fix is structural, not a tweak to the checker colours. No shader stage may
+ever sample the checkerboard.
+
+An offscreen composite is the clean general form, but it is not currently
+reachable: `_QERQglTable` exposes no framebuffer-object, renderbuffer,
+`glReadPixels`, or `glCopyTexImage2D` entry points, so there is nowhere to
+composite to and no way to recover the accumulated alpha. Extending the QGL
+table is a Radiant-wide change and is not justified by this alone.
+
+The implemented form works within that constraint by observing when the
+checkerboard is *provably* harmless. A stack can only be affected by what sits
+behind it through its destination factor, so:
+
+- destination scaled by `GL_ZERO` (opaque replacement) or by
+  `GL_ONE_MINUS_SRC_ALPHA` (conventional transparency) — the checkerboard either
+  cannot contribute or contributes exactly as a background seen through a
+  translucent surface, which is the one reading the checkerboard is *for*;
+- anything else — the destination is data, and a patterned field is multiplied,
+  inverted, or added into the material.
+
+In the second case the checkerboard is replaced by a defined uniform field and
+the substitution is reported. Transparency indication is lost for those
+shaders, which is the correct trade: a stack that reads its destination as data
+has no transparency to indicate.
+
+**Only the first drawn stage can see the backdrop.** A stage blends against the
+destination, but for every stage after the first that destination is *what the
+earlier stages wrote*, not the backdrop. Classifying a stack by whether **any**
+stage reads its destination was therefore wrong, and wrong in a way that showed:
+a trailing `map $lightmap` / `blendFunc filter` stage — itself a preview
+fabrication — made an entire stack look multiplicative and forced a uniform
+light field under materials whose first stage was an ordinary opaque or
+alpha-blended texture. A dark material then read as a pale one.
+
+`textures/outrage/obs` is the case that exposed it: three stages, the first an
+opaque chrome environment map, the last a `$lightmap` filter. The old rule saw
+the filter stage and put a light field underneath; the opaque first stage should
+have made the backdrop irrelevant. `obs-plain` was worse — its single textured
+stage is `blendFunc blend` over a `.tga` whose alpha averages 0.078, so 92% of
+what was displayed was the fabricated light field rather than the material.
+
+Classification now examines only the first drawn stage. Across the shipped
+corpus plus a real authored set, this moves 2,117 of 9,661 definitions (21.9%),
+almost all of them from a uniform field back to the checkerboard:
+
+```text
+backdrop      all-stages   first-only
+checkerboard        3699         5750
+uniform light       4211         2977
+uniform dark        1751          934
+```
+
+`textures/sfx/fanfx` — the case the uniform backdrop was built for — is
+unchanged, because its *first* stage is the one reading the destination.
+
+**Two fields are required, not one.** The two ways of reading a destination want
+opposite ones. A multiplicative stage over a dark field yields darkness and
+loses everything; an additive stage over a light field saturates to white.
+Multiplication decides when a stack does both, because washing out preserves
+more signal than multiplying by nearly zero.
+
+**The light field is not its own constant.** A stage that multiplies its
+destination is asking what light falls on the surface — the same question
+`map $lightmap` asks. Holding those as two separate values produced a
+lightmap slider that appeared to do nothing, because a fixed light field stood
+in front of it for exactly the shaders the slider was meant to affect. They are
+one control: the field is named **Lightmap** and the slider drives both it and
+the `$lightmap` stand-in. The dark field stays fixed, because an additive stage
+is not asking about lighting.
+
+```text
+backdrop chosen across 9654 corpus definitions
+  checkerboard (provably safe)          3656   37.9%
+  uniform light (multiplies destination) 4301   44.6%
+  uniform dark  (adds to destination)    1697   17.6%
+```
+
+**Status:** implemented, and now user-selectable. The automatic classification
+is the default, and a preview-level **Backdrop** control offers Auto,
+Checkerboard, Lightmap, Dark, and Image — where Image accepts a `.shader` source
+as well as an image file. An explicit choice is honoured as given —
+a user compositing a shader over a chosen image has taken responsibility for
+what the destination means. Neither uniform level is pure black or white, so
+neither can be mistaken for shader content, and the status line names the
+backdrop in use.
+
+### Why an image backdrop is a preview control, not an editor feature
+
+How `fanfx` is *used* settles this. In `museum.map` it appears exactly once, and
+the brush is a one-unit-thick plate whose other five faces are all
+`common/nodraw` — a dedicated overlay surface contributing nothing but that one
+face. The next brush is the same construction carrying `sfx/fan`, the opaque fan
+image.
+
+The shader is therefore authored as a layer over other geometry. Its destination
+in the game is the fan and the room behind it. A uniform field makes its
+arithmetic *legible*, but it cannot show what the shader is *for*; only
+compositing it over the thing it modulates can. That is a preview capability, so
+the backdrop control belongs beside the preview rather than waiting for the
+editor.
+
+A consequence that had to be designed in rather than deferred: the useful
+backdrop for this case is another **shader**, not an image. `sfx/fan` is itself
+a shader, and most candidate backdrops are — an overlay is authored against
+another material, and that material is rarely a bare `.tga`. Worse for a plain
+file chooser, most of them live inside PK3s and are reached through the VFS
+rather than the filesystem.
+
+The right source for that list is **Radiant's own active shader list**, not the
+filesystem. Every shader loaded alongside the current map is already in memory,
+reachable through `m_pfnGetActiveShaderCount` and `m_pfnActiveShader_ForIndex`,
+and `IShader::IsInUse()` marks the subset the map actually uses. Choosing from
+that list means:
+
+- no file picker for the common case — the backdrop control opens a menu;
+- **PK3s stop being a problem entirely**, because a shader inside a pak is in
+  the active list like any other. Reaching one through a file chooser was never
+  going to work, and deferring PK3 support is no longer necessary for this
+  feature;
+- the names offered are the ones Radiant will actually resolve, so a chosen
+  backdrop cannot fail to exist.
+
+The menu is grouped by the directory part of the shader name, the same grouping
+the texture browser uses, because the active list runs to thousands of entries
+and one flat menu would be unusable. Shaders in use by the current map are
+offered as their own group ahead of the full set.
+
+Loading a `.shader` file directly is retained behind `From file...` for sources
+that are not loaded — a shader being authored, or one from a set Radiant has not
+been pointed at. That path still has to solve selection, because a shader file
+holds many definitions (`sfx.shader` alone holds **129**):
+
+- one definition in the file: applied directly, no dialog;
+- many: the definitions are listed in file order and the user picks.
+
+A chosen definition is parsed into its own stage list and composited as the
+backdrop, over the lightmap field, before the selected stack is composited over
+that. It is bounded by construction — a backdrop never gets a backdrop of its
+own — and it does not touch the preview clock, so a backdrop that animates
+cannot redefine the timebase the selected shader is being judged against.
+
+The museum case needs neither: with the map open, `textures/sfx/fan` is in the
+active list — and in the "used by this map" group — so previewing `fanfx` over
+it is two clicks.
+
+The worked case is `textures/sfx/fanfx`, which is a single stage of
+`blendFunc GL_ZERO GL_ONE_MINUS_SRC_COLOR` and carries `surfaceparm nolightmap`,
+so it isolates this defect from the `$lightmap` one. A `GL_ZERO` source means
+the result is `dst * (1 - src)` — output that is *entirely* a function of the
+destination. Against the checkerboard the checkerboard was the picture, masked
+by the fan; against the clear colour it was almost black. It now resolves to
+`0.62 * (1 - src)`: a uniform field carrying the fan pattern and nothing else.
+
+### A fabricated neutral input is a semantic lie
+
+`$lightmap` currently resolves to a generated 1x1 pure white texture. White is
+the identity for a filter stage, so this was chosen to be harmless. It is not
+harmless: it asserts a fully lit surface.
+
+```text
+  containing map $lightmap                                3449   35.7%
+  containing both                                         3438   35.6%
+```
+
+A real lightmap is usually much darker than white and is the main reason a
+lightmapped material does not read at full brightness in game. Substituting
+white makes roughly a third of the corpus preview systematically brighter and
+flatter than the material will ever appear on a surface — and because 35.6% of
+definitions hit both problems at once, the same shaders are also being
+multiplied by the checkerboard.
+
+This is the same category error the fault-tolerance policy already forbids
+elsewhere: inventing a plausible value for something the preview cannot know,
+and then not saying so. `$lightmap` in a bare material context is *not
+previewable*. It should be represented as an explicit, visible unknown — in the
+stage list, in the diagnostics, and in the composite — rather than silently
+resolved to the one value that makes the arithmetic disappear.
+
+**Status:** implemented as a preview-level control. The generated lightmap is a
+white 1x1 texture modulated at draw time by a **Lightmap** slider, so the
+fabricated value is visible, adjustable, and reported rather than hidden in the
+renderer. Applying it as a colour multiplier rather than baking it into the
+texture means moving the control needs no re-upload — which matters while
+texture retirement is still outstanding.
+
+The default is **identity**, which is what reproduces the engine. A `filter`
+lightmap stage at 1.0 is a no-op, so the material shows its own colours — the
+right neutral for a material swatch. Quake also doubles the lightmap through
+overbright bits, so a normally lit surface reaches the screen at roughly
+identity, and a preview only agrees with the game here. Lowering the control is
+how a shadowed condition is inspected.
+
+An earlier revision defaulted this to 0.5 on the argument that a white default
+would be the old assertion with a control attached. That reasoning was wrong:
+what made the original substitution a lie was that it was hidden and unreported,
+not its value. Once the fabrication is a labelled control with a visible
+position, the honest default is the one that matches the engine — and comparison
+against a real map confirmed it.
+
+The control generalises past `$lightmap`: inspecting a material under different
+lighting is the same question `rgbGen identityLighting` and overbright raise, and
+those are equally context-free in a bare swatch. It is named for the general
+idea, not for the directive that forced it.
+
+Genuine baked data remains the real answer, and waits on a model/BSP preview
+mode.
+
+`$whiteimage` is the opposite case and should not be confused with it. The
+engine really does generate an internal white image, so a generated 1x1 white
+texture is an exact representation rather than a stand-in — subject to
+confirming the behaviour in the Radiant/build consumer.
+
+### The host renderer can invalidate all of this
+
+A preview that composites correctly can still be wrong after the fact. During
+this work every material read too bright, and the cause was not in ShaderShop at
+all: `radiant/glwidget.cpp` enabled `gtk_gl_area_set_has_alpha( area, TRUE )`
+during the GTK3 port.
+
+`GtkGLArea` uses that alpha channel to blend the GL output with the widget
+background. GtkGLExt under GLX never did — the drawable was opaque and the alpha
+channel inert — so fifteen years of code that ignored framebuffer alpha was
+suddenly meaningful. Radiant's texture browser clears with `alpha 0`, so it went
+fully transparent and rendered as the GTK theme's white, taking its white
+texture labels with it. And any stack ending on an alpha-blended stage left a
+low framebuffer alpha, so its material was composited toward white regardless of
+the colour it had computed.
+
+`textures/outrage/obs` was the case that exposed it. Tracing its alpha:
+
+```text
+clear                                            A = 1.00
+stage 1  GL_ONE / GL_ZERO                        A = 1.00
+stage 2  GL_ONE_MINUS_SRC_ALPHA / GL_SRC_ALPHA   A = 0.078*0.922 + 1.0*0.078 = 0.15
+stage 3  GL_DST_COLOR / GL_ZERO                  A = 0.15
+```
+
+85% of what was displayed was the widget background. The colour ShaderShop
+computed was correct throughout; it was being composited away afterwards.
+
+Radiant's GL views are opaque viewports and are now created with
+`has_alpha FALSE`.
+
+The lesson is a boundary, not a bug: **ShaderShop can only be as correct as the
+surface it draws on.** When output disagrees with the game across *every*
+material rather than a class of them, suspect the host GL surface before the
+stage interpreter. A symptom that uniform is not about blend semantics.
+
+## Preview coordinate space
+
+The preview quad is built in **pixel coordinates**, with the origin at the
+viewport's bottom-left corner. That was fine while the only projection was a 2D
+ortho over the same pixel range. It stops being fine as soon as anything is
+*origin-relative*, because the origin is a corner of the screen rather than the
+centre of the material.
+
+Two features have already been built on top of that assumption and are wrong as
+a result:
+
+- **3D inspection orbits the corner, not the swatch.** The 3D path scales pixel
+  coordinates into a normalised ortho volume without first re-centring, so the
+  quad's centre lands away from the origin — at `(1.00, 0.78)` on a 640x500
+  widget, and exactly on the top-right corner `(1.00, 1.00)` at 500x500.
+  `qglRotatef` then rotates about the origin, so orbiting swings the material
+  around a point off its own corner instead of turning it in place.
+- **`tcGen environment` could not produce a reflection.** `GL_SPHERE_MAP`
+  derives texture coordinates from the eye-space reflection vector. The quad sat
+  at eye `z = 0`, which put the eye vector in the surface plane: with a constant
+  normal `(0,0,1)`, `n·u` was zero and the reflection collapsed to
+  `normalize(x, y, 0)` — a ring anchored on the *pixel-space origin*, determined
+  by where the quad happened to sit in the viewport rather than by surface
+  orientation. Note this was a consequence of the surface lying in the eye
+  plane, not of the projection being orthographic; eye-space position varies
+  across the quad under ortho too, once the surface is held off that plane.
+
+The rule going forward: **preview geometry is defined in a centred, unit
+material space, and the projection maps that space to the viewport.** Pixel
+extents are a property of the projection, not of the vertices. Any feature that
+depends on orientation, rotation, or an eye vector must be expressed in that
+centred space.
+
+A second requirement follows for any reflection-based generator: **the material
+must be held off the eye plane.** A surface at eye `z = 0` degenerates the eye
+vector into the surface plane regardless of projection. A fixed eye offset keeps
+it well defined, and because `glNormal3f` is specified in object space and
+transformed by the modelview, the reflection then tracks the material as it is
+orbited.
+
+A flat quad still only ever shows one surface orientation, so environment
+mapping remains an approximation until there is curvature or a perspective
+camera to vary the normal across the surface. What inspection mode buys is the
+ability to vary that single orientation interactively and see the reflection
+respond.
+
+**Status:** implemented. Preview geometry is defined in centred material space
+with the longer side spanning one unit; view extents, margin, and zoom belong to
+the projection. Verified numerically across viewport and material aspect ratios:
+the material centre lands on the origin exactly, the constraining axis fills
+78% as before, material aspect is preserved, the rotated quad stays inside the
+depth range, and the eye vector is non-degenerate at every corner. Orbit
+rotation and pointer panning now operate on the material rather than on a window
+corner, and panning converts pointer pixels through the live view extents so a
+drag tracks the cursor at any zoom.
 
 ## Stage ownership rule
 
@@ -554,6 +938,43 @@ comparison should follow the actual Radiant/build consumer behavior.
 The manual may explain why a distinction exists, but it does not override the
 code.
 
+## Loader seam
+
+The backdrop image, the eventual stage-source browser, `Create Shader...`, and
+the shader document all need the same thing: resolve a name the user chose into
+something the preview can draw, through Radiant's VFS and image manager rather
+than a private decoder.
+
+That seam exists now as `PreviewImageSource` — a named image owning its CPU
+buffer and its preview texture, loaded by `preview_source_load` through the same
+`load_image` path the stages use, so VFS resolution and the extensionless retry
+come free. `preview_source_relative_name` trims the game path from a chooser's
+absolute filename so the image manager resolves it the way a shader reference
+would, and reports plainly when the chosen file lies outside the VFS instead of
+failing silently.
+
+Alongside it, the parser was split so that parsing is not tied to the selection.
+`parse_definition_into` takes its target stage list, source buffer, and name, so
+the same code serves the selected shader and a backdrop shader;
+`enumerate_definitions` lists every definition header in a source in file order;
+and `clear_stage_list` / `load_stage_images` take the list they operate on. The
+clock update is a parameter rather than an assumption, because only the selected
+shader may define the preview timebase.
+
+That split is what made a shader backdrop possible without a second parser, and
+it is the same split the editor needs. What remains to be added on this seam:
+
+- browsing and replacing a stage's `map` source from the stage list;
+- reading a shader document for editing, which is the same VFS load the parser
+  already performs;
+- a PK3-aware file browser, should a source that Radiant has *not* loaded ever
+  need reaching; the active-list menu removed the urgency.
+
+`Create Shader...` exists in the control strip and reports honestly that it
+needs the document layer. It is a placed track, not a stub pretending to work:
+the button's presence fixes where the action lives, and its message states that
+authoring writes a loose `scripts/*.shader` file rather than touching a PK3.
+
 ## Milestones
 
 ### 1. Preview shell
@@ -608,31 +1029,28 @@ directives.
 - Corpus verification exercises the stage interpreter above ScriptLib rather
   than comparing two tokenizers.
 
-**Status:** complete for the current preview. ShaderShop requests ScriptLib and
-uses it to parse the VFS-loaded selected definition, preserving stage order,
-`map`/`clampmap`, `animMap` frame lists, and stage-local blend state. The
-shader API requirement is a normal Synapse wildcard requirement; registering
-`SYN_REQUIRE_ANY` directly leaves the table unpopulated and produces the
-misleading zero-stage state.
+**Status:** met. ShaderShop requests `SCRIPLIB_MAJOR` through Synapse and parses
+the VFS-loaded selected definition through `_QERScripLibTable`. The private
+tokenizer has been removed outright — no lexical helper, comment scanner,
+quoted-token reader, or raw line scanner remains in the production path. Line
+scoped arguments go through `ScriptLine()` plus `UnGetToken()`. Stage order,
+`map` versus `clampmap`, `animMap` frame lists, special map tokens, and
+stage-local blend state are preserved, and the zero-stage status has been split
+into concrete source/lookup/parse states.
 
-The previous native parity result — 259,236 identical tokens across 268 files —
-is evidence that the old tokenizer learned the right lessons, not a permanent
-architecture. The milestone is reopened until that tokenizer is replaced by
-Radiant's exported parser.
+One registration note worth keeping: the shader API is a normal Synapse
+wildcard requirement. Registering `SYN_REQUIRE_ANY` directly leaves the table
+unpopulated, which presents as an unexplained zero-stage result.
 
-Still required before this milestone is complete:
+The earlier native parity result — 259,236 identical tokens across 268 files —
+was evidence that the old tokenizer had learned the right lessons. It is not an
+architecture, and it is no longer maintained. Radiant's parser is now simply
+the parser.
 
-- add `_QERScripLibTable` to ShaderShop and request `SCRIPLIB_MAJOR` through
-  Synapse;
-- convert the selected-shader/stage interpreter to consume ScriptLib tokens;
-- replace raw line scanning with `ScriptLine()` / `UnGetToken()` handling;
-- remove private lexical helpers and tokenizer-extraction verification;
-- retain `map` versus `clampmap` as distinct map kinds rather than collapsing
-  them to one filename;
-- recognise special map tokens explicitly;
-- retain unsupported directives instead of dropping them;
-- split the zero-stage status into the concrete source/lookup/parse states
-  listed in the fault-tolerance section.
+Remaining in this milestone:
+
+- retain unsupported directives as first-class source rather than dropping
+  them, which is a prerequisite for milestone 5 rather than for the preview.
 
 The corpus cases that found the old opening-boundary, quoted-name, doubled-slash,
 and commented-brace defects remain valuable tests. Their expected result is now
@@ -681,6 +1099,11 @@ overlapping ways:
 - **1,529** spelled the keyword in a case the parser did not match before the
   boundary work. They now parse, and mostly land in one of the categories above
   instead.
+
+A related fidelity note found in the same authored set: shaders routinely name a
+`.tga` for an asset that ships as `.jpg` (`ragechrome_env`, `ragegilt_env`). The
+extensionless VFS retry in `load_image` is what resolves these, and without it
+those stages silently would not draw. It is load-bearing, not a convenience.
 
 The preview must distinguish the following states. The manual documents these
 forms in section 6.2, but the resolved behavior must be checked against the
@@ -735,7 +1158,11 @@ After blend behaviour is correct, add operations in modest increments:
 
 `tcMod` operations must remain ordered; section 6.6 states coordinates are
 modified in the order the directives appear, and composition is
-order-dependent. Note that the corpus spells the keyword `tcmod` 1,800 times
+order-dependent. The current implementation applies scroll, stretch, rotate,
+scale, and transform in a fixed sequence written into the renderer, which is
+only accidentally correct when a stage happens to list them that way. The stage
+model needs an ordered list of `tcMod` operations, not a set of independent
+flags. Note that the corpus spells the keyword `tcmod` 1,800 times
 against `tcMod` 4,004, so case folding is a prerequisite here too.
 
 When `rgbGen` arrives, its default is not constant: section 6.3 selects
@@ -749,14 +1176,31 @@ advance, pause, and resume deterministically. Two animated stages with different
 frequencies remain independent. Re-measuring the corpus shows no `blendFunc`
 directive resolving to an unintended factor.
 
-**Status:** ordered stage compositing and stage-owned animation are working in
-the shipped corpus. Explicit blend-factor case folding plus `add`, `filter`,
-and `blend` shorthand are implemented. `$lightmap` uses neutral generated
-white in the bare preview, while `clampmap` uses clamp-to-edge so animated
-jumppad rings do not tile into the frame. `rgbGen wave`, `tcMod stretch`, and
-`tcMod scroll` provide the first time-based jumppad and sky effects. Remaining
-parity work includes exact square-wave evaluation, ordered general `tcMod`, alpha functions,
-generated sources, and a real surface lightmap path.
+**Status:** substantial progress, with one class of defect now blocking further
+feature work.
+
+Working: ordered stage compositing and stage-owned animation; blend-factor case
+folding; `add` / `filter` / `blend` shorthand; the `SRC_COLOR` family in the
+factor table; the corrected `GL_ONE`/`GL_ZERO` default for a stage with no
+`blendFunc`; `clampmap` mapped to clamp-to-edge so jumppad rings do not tile;
+`alphaFunc`; `rgbGen wave`; `tcMod scroll`, `scale`, `rotate`, `transform`, and
+`stretch`; and the extensionless VFS retry that lets a mod ship a format other
+than the one the shader names.
+
+**Fixed since:** the checkerboard is no longer an operand. It is now used only
+where it provably cannot affect the result, and a defined uniform backdrop is
+substituted elsewhere, with the choice reported. Preview geometry is centred, so
+orbit and reflection generators act on the material.
+
+**Still blocking:** `$lightmap` fabricates white for 35.7% of corpus
+definitions. Until that stops asserting a fully lit surface, brightness
+comparisons against in-game appearance remain unreliable for roughly a third of
+the corpus.
+
+Also outstanding: `square` waveforms are accepted but evaluated as sine (see the
+fault-tolerance policy); `tcMod` operations are applied in a fixed internal
+order rather than source order; and preview time is still derived from a shared
+tick counter rather than elapsed time.
 
 ### 4. Stage stack and editing entry point
 
@@ -871,11 +1315,21 @@ so this accumulates during exactly the workflow the module is for. Retained
 placeholders for failed animation frames hold no GL name, so they do not add to
 this.
 
+`qglDeleteTextures` is present in the QGL dispatch table and is currently called
+nowhere in the module — nothing ShaderShop allocates on the GPU is ever
+released. An `animMap` stage leaks up to eight names per refresh.
+
 Old CPU image buffers can be released immediately, but old GL texture names must
 be retired and deleted while the preview context is current. Do not solve this
 by casually making the preview context current inside arbitrary UI callbacks. A
 deferred-retirement list consumed at the start of the next render is sufficient;
 there is no need for a general resource manager yet.
+
+**Status:** texture retirement is implemented. `qglDeleteTextures` was present
+in the dispatch table and called nowhere, so nothing ShaderShop allocated on the
+GPU was ever released and every selection change leaked its whole stage stack.
+Dropping a texture now pushes its name onto a retirement list consumed at the
+top of the next render, where the preview context is guaranteed current.
 
 **The animation timer leaves a stale source id.** The tick callback returns
 `FALSE` when the widget is gone without clearing `g_animationTimer`. GLib then
@@ -1007,28 +1461,71 @@ The same preview-shell smoke test remains the minimum platform gate:
 - Source parsing and source rewriting are different milestones. The preview can
   use a small semantic interpreter now; destructive pretty-print serialization
   must wait for the lossless source model.
+- Presentation scaffolding must not be reachable by shader arithmetic. A
+  background drawn into the destination buffer becomes an operand for every
+  destination-reading blend factor, and roughly two in five shipped shaders use
+  one.
+- A neutral placeholder chosen because it is the identity for one blend mode is
+  still a fabricated input. White `$lightmap` is the identity for a filter
+  stage and a lie about every lit surface.
+- Geometry defined in pixel coordinates puts the origin at a screen corner.
+  Anything origin-relative — rotation, sphere-map texgen, an orbit camera —
+  then pivots on that corner instead of on the material.
+- An orthographic camera gives a flat quad one surface orientation and one eye
+  vector. Reflection-based texture generation cannot vary across it, so
+  environment mapping needs curvature or perspective before it means anything.
+- Validating an enumerated argument and then discarding which value it was is
+  worse than not parsing it. `square` accepted and drawn as `sin` is invisible
+  to the diagnostics that exist precisely to catch it.
+- ScriptLib's cursor is process-global. Freeing the buffer it points into
+  leaves shared state dangling for every other consumer in the editor.
 - A renamed module leaves its old shared library behind in the install tree.
 
 ## Near-term sequence
 
-Keep the next work narrow. Parser deference and basic stage playback are now
-established; extend renderer semantics without weakening that boundary.
+Compositing isolation comes first. It is not a feature; it is the precondition
+for believing any of the features already built. Roughly 42% of the corpus is
+currently composited against the preview's own background, so blend, `rgbGen`,
+and `alphaGen` work done before this lands is being validated against the wrong
+picture.
 
-1. Make preview time truly elapsed-time based, preserving independent stage
-   frequencies rather than deriving time from a shared tick rate.
-2. Complete wave semantics, including a true square waveform and alpha waves.
-3. Retain and apply ordered `tcMod` operations: scroll, scale, rotate, then
-   stretch alongside one another.
-4. Add `alphaFunc` and the remaining blend-factor families, reporting unknown
-   values rather than selecting a plausible fallback.
-5. Generate `$whiteimage`; retain the neutral `$lightmap` fallback until a
-   model/BSP preview supplies genuine baked data.
-6. Add deferred deletion of superseded preview GL textures and restore the GTK
-   2 build by guarding GTK 3-only layout calls.
-7. Move native verification fully up to the ScriptLib-backed stage interpreter.
+1. ~~**Isolate compositing.**~~ Done. The checkerboard is used only where it
+   provably cannot contribute; every other stack gets a defined uniform light or
+   dark field, chosen by how it reads its destination and named in the status
+   line. An offscreen composite remains the better general answer if the QGL
+   table ever gains framebuffer objects.
+2. ~~**Stop fabricating lightmaps.**~~ Done. The stand-in level is a preview
+   control defaulting to 0.5 rather than a hidden white constant, applied as a
+   draw-time multiplier so it needs no texture rebuild.
+3. ~~**Fix the preview coordinate space.**~~ Done. Geometry is defined in
+   centred unit material space, the projection owns viewport extents and zoom,
+   and the material is held off the eye plane so reflection generators are well
+   defined. Orbit and pan now pivot on the material.
+4. **Honour waveform type**, or report `square` as unsupported. Whichever is
+   quicker — but not the current silent substitution.
+5. ~~**Retire GL textures.**~~ Done. Deferred-deletion list consumed at the
+   start of the next render. Still outstanding from this item: clear the
+   animation timer id wherever the source can end.
+6. **Make preview time elapsed-time based**, preserving independent stage
+   frequencies rather than deriving them from one shared tick rate.
+7. **Give `tcMod` a real ordered list** rather than independent flags applied in
+   a fixed renderer sequence.
+8. Generate `$whiteimage` once the Radiant/build consumer confirms the
+   documented behaviour.
+9. Restore the GTK 2 build by guarding GTK 3-only layout calls.
+10. Move native verification fully up to the ScriptLib-backed stage interpreter.
+
+Items 1 through 3 were all the same underlying discipline, and all three are now
+done: the preview does not let its own scaffolding — background, placeholder, or
+coordinate origin — participate in what it claims to be showing. Where a value
+must be invented, it is a visible control rather than a constant. That
+discipline is what separates a preview from a picture that merely resembles one.
+
+The next work is the resource lifecycle, which is the last defect that
+accumulates rather than merely misleads.
 
 The old private-parser corpus work is not discarded: it identified the semantic
-boundaries that the ScriptLib-driven interpreter must preserve. What changes is
+boundaries that the ScriptLib-driven interpreter must preserve. What changed is
 ownership. ShaderShop no longer proves that it can imitate Radiant's parser; it
 uses Radiant's parser.
 
