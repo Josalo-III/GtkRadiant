@@ -3200,6 +3200,13 @@ void PrefsDlg::LoadPrefs(){
 		{1.0f,  0.f,    0.f},
 		{0.f,   0.f,    0.f},
 		{0.f,   0.f,    0.f},
+		// COLOR_DETAIL. This entry was missing: the initialiser supplied 15
+		// values for a COLOR_LAST-sized array, so the last colour was left to
+		// zero-fill. Black is what it resolved to and what OnColorSetoriginal
+		// assigns, so stating it explicitly changes nothing on screen while
+		// removing a trap: adding a colour to the enum would otherwise leave
+		// the new entry silently undefined rather than failing to compile.
+		{0.f,   0.f,    0.f},
 	};
 
 	for ( i = 0; i < COLOR_LAST; i++ ) {

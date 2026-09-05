@@ -49,7 +49,17 @@ GtkWidget* WINAPI gtk_glwidget_new( gboolean zbuffer, GtkWidget* share ){
 
 	gtk_gl_area_set_use_es( area, FALSE );
 	gtk_gl_area_set_required_version( area, 2, 1 );
-	gtk_gl_area_set_has_alpha( area, TRUE );
+	// Radiant's GL views are opaque viewports, never composited with whatever is
+	// behind the widget. GtkGLArea uses this alpha channel to blend its output
+	// with the widget background, which GtkGLExt/GLX never did: under GTK2 the
+	// drawable was simply opaque and the alpha channel was ignored.
+	//
+	// Enabling it here made every clear and every blend leak the GTK theme
+	// background through. The texture window clears with alpha 0, so it went
+	// fully transparent and rendered as the theme's white; and any stack ending
+	// on an alpha-blended stage left a low framebuffer alpha, so its material was
+	// composited away toward white regardless of the colour it had computed.
+	gtk_gl_area_set_has_alpha( area, FALSE );
 	gtk_gl_area_set_has_depth_buffer( area, zbuffer );
 	g_object_set_data( G_OBJECT( widget ), "radiant-share-widget", share );
 
@@ -80,6 +90,22 @@ gboolean WINAPI gtk_glwidget_make_current( GtkWidget *widget ){
 	if ( context == NULL || gdk_gl_context_get_current() != context ) {
 		gtk_gl_area_make_current( area );
 		context = gtk_gl_area_get_context( area );
+	}
+
+	// Making the context current is only half of it: GtkGLArea renders into its
+	// own framebuffer object, and gtk_gl_area_make_current() does not bind it.
+	// GTK attaches the buffers itself before emitting "render", so a handler
+	// running inside that signal is already correct -- but every other caller
+	// (realize, timers, selection refreshes) would otherwise be left drawing
+	// into framebuffer 0, where nothing is displayed and the area's own buffer
+	// keeps whatever undefined contents it had.
+	//
+	// With several GL areas alive this presents as an intermittent blank view:
+	// whether it bites depends on which context was current when the call was
+	// made. Attaching here restores the contract the GtkGLExt API had, where
+	// making a widget current meant its drawing surface was the target.
+	if ( gtk_widget_get_realized( widget ) ) {
+		gtk_gl_area_attach_buffers( area );
 	}
 
 	GError* error = gtk_gl_area_get_error( area );
