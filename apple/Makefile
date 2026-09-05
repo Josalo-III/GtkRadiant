@@ -9,7 +9,11 @@ CONFDIR = $(RESOURCES)/etc
 DATADIR = $(RESOURCES)/share
 LIBDIR = $(RESOURCES)/lib
 VERSION = 1.6.7
-DMG = $(TARGET)/GtkRadiant-$(VERSION).dmg
+# Preview releases are distinguished in the artifact name. The release notes
+# publish a SHA-256 per preview, so two builds must never share a filename:
+# a fixed name silently replaces the artifact an earlier note still refers to.
+PREVIEW = 2
+DMG = $(TARGET)/GtkRadiant-$(VERSION)-preview.$(PREVIEW).dmg
 DMGROOT = $(TARGET)/dmg-root
 VOLUME_NAME = "GtkRadiant $(VERSION)"
 
@@ -83,5 +87,11 @@ image:
 	hdiutil create -ov $(DMG) -srcfolder $(DMGROOT) -volname $(VOLUME_NAME)
 	rm -rf $(DMGROOT)
 
+# Clean the bundle and staging directory but keep built disk images: they are
+# the release artifacts, they take a long time to produce, and an earlier
+# preview's image must survive the next preview's build.
 clean:
+	rm -rf $(TARGET)/GtkRadiant.app $(DMGROOT)
+
+distclean:
 	rm -rf $(TARGET)/*

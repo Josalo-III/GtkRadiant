@@ -1106,6 +1106,45 @@ correctly. A focused navigation check remains: observe several bots crossing
 the map, using lifts, jump pads, and teleports where present, and distinguish
 route gaps from ordinary combat idling before changing BSPC or the map.
 
+### Phase 6a - Preview 2, GL surface correctness
+
+Preview 1 shipped an editor whose OpenGL views were systematically wrong, and
+the fault was in the port rather than in any one view. Two GTK2 assumptions had
+survived into GTK3 and only became meaningful there.
+
+`gtk_gl_area_set_has_alpha( TRUE )` let GtkGLArea blend each view's output with
+the widget background. GtkGLExt under GLX had never done so - the drawable was
+opaque and the alpha channel inert - so fifteen years of code that ignores
+framebuffer alpha suddenly leaked the theme background through every clear and
+every blend. The texture browser clears with alpha 0 and rendered as the theme's
+white, taking its white texture labels with it. Anything ending on an
+alpha-blended pass was composited toward white regardless of the colour it had
+computed.
+
+`gtk_gl_area_make_current()` binds the context but not the widget's framebuffer
+object. GTK attaches it before emitting `render`, so drawing from inside that
+signal was correct; realize handlers, timers and refreshes were left drawing
+into framebuffer 0. With five GL areas alive the symptom was an intermittent
+blank view that cleared on resize.
+
+Both are one-line corrections, but they are worth recording because of how they
+presented. Neither looked like a GL bug: the first looked like a shader
+compositing error and was chased as one for some time, and the second looked
+like a first-frame timing problem and attracted several unnecessary redraw
+requests before the cause was found. **When output is wrong across every view or
+every material rather than a class of them, suspect the shared surface before
+the code drawing on it.**
+
+A third defect found alongside them: `vDefaultColours` supplied fifteen
+initialisers for a sixteen-element array, leaving `COLOR_DETAIL` to zero-fill.
+The value is unchanged, but the omission is no longer waiting for the next
+colour added to the enum.
+
+Preview artifacts now carry the preview number in the filename. The release
+notes publish a SHA-256 per preview, and a fixed name silently replaces the
+artifact an earlier note still refers to. `make clean` correspondingly keeps
+built disk images and `make distclean` removes them.
+
 ### Recovered Windows 7 environment audit
 
 The original Windows 7 SSD was recovered and mounted at `/Volumes/Windows7`.

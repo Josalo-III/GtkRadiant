@@ -20,7 +20,7 @@ clean-machine-qualified release.
 
 Drag `GtkRadiant.app` onto the Applications alias before launching it. On first
 run, choose the game and its installation directory. Preferences and generated
-game descriptions are stored under `~/Library/Application Support/GtkRadiant`.
+game descriptions are stored under `~/.radiant/1.6.7`.
 
 The app is ad-hoc signed but not Apple-notarized. macOS may therefore require
 using **Open** from the Finder context menu on first launch.
@@ -38,6 +38,6 @@ The bundle has not yet been tested on a clean Mac without the build-time
 MacPorts installation. Please report packaging and XQuartz failures with the
 macOS crash report and `radiant.log` when available.
 
-SHA-256 (`GtkRadiant-1.6.7.dmg`):
+SHA-256 (`GtkRadiant-1.6.7-preview.1.dmg`, published as `GtkRadiant-1.6.7.dmg`):
 
 `b71bf657105cc2689561ba709861722e539a666ef9a00651f8d21ddad9a9ce1a`
