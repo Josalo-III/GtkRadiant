@@ -3,6 +3,7 @@
 
 /apple/target/*
 /build
+/contrib/shadershop/tests/build/
 /install
 /packs
 /macos-work
