@@ -1495,19 +1495,22 @@ picture.
    line. An offscreen composite remains the better general answer if the QGL
    table ever gains framebuffer objects.
 2. ~~**Stop fabricating lightmaps.**~~ Done. The stand-in level is a preview
-   control defaulting to 0.5 rather than a hidden white constant, applied as a
-   draw-time multiplier so it needs no texture rebuild.
+   control defaulting to identity rather than a hidden white constant, applied
+   as a draw-time multiplier so it needs no texture rebuild.
 3. ~~**Fix the preview coordinate space.**~~ Done. Geometry is defined in
    centred unit material space, the projection owns viewport extents and zoom,
    and the material is held off the eye plane so reflection generators are well
    defined. Orbit and pan now pivot on the material.
-4. **Honour waveform type**, or report `square` as unsupported. Whichever is
-   quicker — but not the current silent substitution.
+4. ~~**Honour waveform type.**~~ Done, and wider than planned. All five
+   waveforms the language defines are evaluated to match the engine's generated
+   tables: `sin`, `triangle`, `square`, `sawtooth`, `inversesawtooth`. Anything
+   else is reported rather than substituted.
 5. ~~**Retire GL textures.**~~ Done. Deferred-deletion list consumed at the
-   start of the next render. Still outstanding from this item: clear the
-   animation timer id wherever the source can end.
-6. **Make preview time elapsed-time based**, preserving independent stage
-   frequencies rather than deriving them from one shared tick rate.
+   start of the next render, and the animation timer id is cleared wherever the
+   source can end.
+6. ~~**Make preview time elapsed-time based.**~~ Done. Time is monotonic
+   elapsed seconds, paused and resumed with the transport; the timer only asks
+   for repaints.
 7. **Give `tcMod` a real ordered list** rather than independent flags applied in
    a fixed renderer sequence.
 8. Generate `$whiteimage` once the Radiant/build consumer confirms the
@@ -1521,8 +1524,40 @@ coordinate origin — participate in what it claims to be showing. Where a value
 must be invented, it is a visible control rather than a constant. That
 discipline is what separates a preview from a picture that merely resembles one.
 
-The next work is the resource lifecycle, which is the last defect that
-accumulates rather than merely misleads.
+### Waveforms and the preview clock
+
+Time-varying stage state was two faults, and they had to be fixed together
+because a waveform is a function of time and the time was wrong.
+
+The clock was a repaint counter divided by a single rate, and that rate was the
+maximum any stage demanded. Every stage's timing was therefore a function of its
+neighbours: two `animMap` stages at different frequencies beat against each
+other, and a waveform's period depended on what else was in the shader. Preview
+time is now monotonic elapsed seconds, paused and resumed with the transport,
+and the timer only asks for repaints. `animMap` selects
+`floor( time * frequency ) mod frameCount` per stage, in real time.
+
+On that base all five waveforms the language defines are evaluated to match the
+engine's generated tables rather than a tidier definition — triangle peaks at a
+quarter period and square swings between -1 and 1, so a stage's base and
+amplitude mean what its author intended. Measured over the shipped corpus plus a
+real authored set, `sin` is only 55% of wave directives:
+
+```text
+ 1037  sin               was correct
+  196  square            was accepted, then drawn as sin
+  218  inversesawtooth   was rejected, no animation
+  154  sawtooth          was rejected
+  134  triangle          was rejected
+  132  noise / random    not in the language; still reported
+```
+
+The 196 `square` directives are the ones that mattered most: accepted,
+validated, and then quietly drawn as something else, which is the single
+outcome the fault-tolerance policy exists to prevent.
+
+The next work is `tcMod` ordering, which is the last place where a stage's
+declared meaning is reinterpreted rather than followed.
 
 The old private-parser corpus work is not discarded: it identified the semantic
 boundaries that the ScriptLib-driven interpreter must preserve. What changed is

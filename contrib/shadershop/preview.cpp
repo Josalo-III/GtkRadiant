@@ -168,6 +168,46 @@ struct AnimationFrame
 	AnimationFrame() : pixels( NULL ), width( 0 ), height( 0 ), texture( 0 ), uploaded( false ) {}
 };
 
+static bool keyword_equals( const std::string& token, const char* keyword );
+
+// The five waveforms the shader language defines (manual 2.4.8). Evaluated to
+// match the engine's generated tables rather than to a tidier definition: the
+// triangle peaks at a quarter period and square swings between -1 and 1, so a
+// stage's base and amplitude mean what its author intended.
+enum WaveForm
+{
+	WAVE_SIN,
+	WAVE_TRIANGLE,
+	WAVE_SQUARE,
+	WAVE_SAWTOOTH,
+	WAVE_INVERSE_SAWTOOTH
+};
+
+static float wave_value( WaveForm form, float t ){
+	t -= floorf( t );
+	switch ( form ) {
+	case WAVE_TRIANGLE:
+		if ( t < 0.25f ) return 4.0f * t;
+		if ( t < 0.75f ) return 2.0f - 4.0f * t;
+		return ( t - 0.75f ) * 4.0f - 1.0f;
+	case WAVE_SQUARE:           return t < 0.5f ? 1.0f : -1.0f;
+	case WAVE_SAWTOOTH:         return t;
+	case WAVE_INVERSE_SAWTOOTH: return 1.0f - t;
+	case WAVE_SIN:
+		break;
+	}
+	return sinf( 6.28318530718f * t );
+}
+
+static bool parse_wave_form( const std::string& token, WaveForm& form ){
+	if ( keyword_equals( token, "sin" ) )             { form = WAVE_SIN;              return true; }
+	if ( keyword_equals( token, "triangle" ) )        { form = WAVE_TRIANGLE;         return true; }
+	if ( keyword_equals( token, "square" ) )          { form = WAVE_SQUARE;           return true; }
+	if ( keyword_equals( token, "sawtooth" ) )        { form = WAVE_SAWTOOTH;         return true; }
+	if ( keyword_equals( token, "inversesawtooth" ) ) { form = WAVE_INVERSE_SAWTOOTH; return true; }
+	return false;
+}
+
 // The engine stores a fixed number of animation frames per stage.
 static const size_t ANIMATION_FRAME_LIMIT = 8;
 
@@ -186,6 +226,8 @@ struct PreviewStage
 	float animationFps;
 	bool rgbWave;
 	bool stretchWave;
+	WaveForm rgbWaveForm;
+	WaveForm stretchWaveForm;
 	bool scroll;
 	bool rotate;
 	bool scale;
@@ -214,7 +256,7 @@ struct PreviewStage
 		height( 0 ),
 		texture( 0 ),
 		uploaded( false ),
-		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ), scroll( false ), rotate( false ), scale( false ), transform( false ), environmentTexGen( false ), alphaFunction( GL_ALWAYS ), alphaReference( 0.0f ), alpha( 1.0f ),
+		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ), rgbWaveForm( WAVE_SIN ), stretchWaveForm( WAVE_SIN ), scroll( false ), rotate( false ), scale( false ), transform( false ), environmentTexGen( false ), alphaFunction( GL_ALWAYS ), alphaReference( 0.0f ), alpha( 1.0f ),
 		rgbBase( 1.0f ), rgbAmplitude( 0.0f ), rgbPhase( 0.0f ), rgbFrequency( 0.0f ),
 		stretchBase( 1.0f ), stretchAmplitude( 0.0f ), stretchPhase( 0.0f ), stretchFrequency( 0.0f ),
 		scrollS( 0.0f ), scrollT( 0.0f ), rotateDegreesPerSecond( 0.0f ), scaleS( 1.0f ), scaleT( 1.0f )
@@ -270,10 +312,46 @@ static void shadershop_warn( const char* format, ... ){
 	}
 }
 
+// Preview time is real elapsed time, not a count of repaints. A tick counter
+// divided by a shared clock rate made every stage's timing a function of
+// whatever other stage happened to demand the fastest rate: two animMap stages
+// at different frequencies beat against each other, and a waveform's period
+// depended on its neighbours. Stages are independent, so their time must be.
+//
+// The timer's only job is now to ask for repaints; it is not the time source.
+static const guint PREVIEW_REPAINT_INTERVAL_MS = 16;
+
 static guint g_animationTimer = 0;
-static unsigned int g_animationTick = 0;
-static float g_animationClockFps = 0.0f;
+static bool g_animationActive = false;
 static bool g_animationPaused = false;
+static gint64 g_animationResumed = 0;   // monotonic microseconds, 0 when paused
+static double g_animationElapsed = 0.0; // seconds accumulated before this run
+
+static double preview_seconds(){
+	double seconds = g_animationElapsed;
+	if ( g_animationResumed != 0 ) {
+		seconds += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0;
+	}
+	return seconds;
+}
+
+static void preview_clock_reset(){
+	g_animationElapsed = 0.0;
+	g_animationResumed = g_animationPaused ? 0 : g_get_monotonic_time();
+}
+
+static void preview_clock_pause(){
+	if ( g_animationResumed != 0 ) {
+		g_animationElapsed += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0;
+		g_animationResumed = 0;
+	}
+}
+
+static void preview_clock_resume(){
+	if ( g_animationResumed == 0 ) {
+		g_animationResumed = g_get_monotonic_time();
+	}
+}
 
 static void clear_stage_list( std::vector<PreviewStage>& stages ){
 	for ( std::vector<PreviewStage>::iterator stage = stages.begin(); stage != stages.end(); ++stage ) {
@@ -298,7 +376,7 @@ static void clear_stage_list( std::vector<PreviewStage>& stages ){
 
 static void clear_stages(){
 	clear_stage_list( g_stages );
-	g_animationClockFps = 0.0f;
+	g_animationActive = false;
 }
 
 // The image manager reports failure by leaving the pixel pointer null, but a
@@ -546,7 +624,7 @@ static void classify_destination_use(){
 // redefine the preview clock the selected shader is being judged against.
 static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClock ){
 	if ( updateClock ) {
-		g_animationClockFps = 0.0f;
+		g_animationActive = false;
 	}
 
 	int stageNumber = 0;
@@ -576,8 +654,8 @@ static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClo
 			if ( loaded == 0 ) {
 				shadershop_warn( "stage %d: no animation frame could be loaded", stageNumber );
 			}
-			if ( updateClock && stage->animationFrames.size() > 1 && stage->animationFps > g_animationClockFps ) {
-				g_animationClockFps = stage->animationFps;
+			if ( updateClock && stage->animationFrames.size() > 1 && stage->animationFps > 0.0f ) {
+				g_animationActive = true;
 			}
 		}
 		else if ( !stage->mapName.empty() ) {
@@ -608,7 +686,7 @@ static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClo
 			shadershop_warn( "stage %d: no image source", stageNumber );
 		}
 		if ( updateClock && ( stage->rgbWave || stage->stretchWave || stage->scroll || stage->rotate ) ) {
-			g_animationClockFps = std::max( g_animationClockFps, 30.0f );
+			g_animationActive = true;
 		}
 	}
 }
@@ -894,9 +972,10 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 				shadershop_warn( "stage %d: incomplete %s %s", stageNumber, token.c_str(), mode.c_str() );
 				continue;
 			}
-			if ( !keyword_equals( wave, "sin" ) && !keyword_equals( wave, "square" ) ) { shadershop_warn( "stage %d: wave '%s' is not supported yet", stageNumber, wave.c_str() ); continue; }
+			WaveForm form;
+			if ( !parse_wave_form( wave, form ) ) { shadershop_warn( "stage %d: waveform '%s' is not supported", stageNumber, wave.c_str() ); continue; }
 			const float b = static_cast<float>( atof( base.c_str() ) ), a = static_cast<float>( atof( amplitude.c_str() ) ), p = static_cast<float>( atof( phase.c_str() ) ), f = static_cast<float>( atof( frequency.c_str() ) );
-			stage.stretchWave = true; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f;
+			stage.stretchWave = true; stage.stretchWaveForm = form; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f;
 		}
 		else if ( keyword_equals( token, "rgbGen" ) ) {
 			std::string mode;
@@ -906,8 +985,10 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 				shadershop_warn( "stage %d: incomplete rgbGen wave", stageNumber );
 				continue;
 			}
-			if ( !keyword_equals( wave, "sin" ) && !keyword_equals( wave, "square" ) ) { shadershop_warn( "stage %d: wave '%s' is not supported yet", stageNumber, wave.c_str() ); continue; }
+			WaveForm form;
+			if ( !parse_wave_form( wave, form ) ) { shadershop_warn( "stage %d: waveform '%s' is not supported", stageNumber, wave.c_str() ); continue; }
 			stage.rgbWave = true;
+			stage.rgbWaveForm = form;
 			stage.rgbBase = static_cast<float>( atof( base.c_str() ) );
 			stage.rgbAmplitude = static_cast<float>( atof( amplitude.c_str() ) );
 			stage.rgbPhase = static_cast<float>( atof( phase.c_str() ) );
@@ -1039,11 +1120,14 @@ static int animated_stage_count(){
 }
 
 static gboolean animation_tick( gpointer ){
-	if ( g_pPreviewWidget == NULL || g_animationClockFps <= 0.0f ) {
+	if ( g_pPreviewWidget == NULL || !g_animationActive ) {
+		// Clear the id here too: returning FALSE destroys the source, and a
+		// stale id makes the next g_source_remove raise a GLib critical and
+		// start_animation_timer decline to restart.
+		g_animationTimer = 0;
 		return FALSE;
 	}
 
-	++g_animationTick;
 #if GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
 #else
@@ -1064,12 +1148,8 @@ static void queue_preview_render(){
 }
 
 static void start_animation_timer(){
-	if ( g_animationTimer == 0 && !g_animationPaused && g_animationClockFps > 0.0f ) {
-		guint interval = static_cast<guint>( 1000.0f / g_animationClockFps );
-		if ( interval == 0 ) {
-			interval = 1;
-		}
-		g_animationTimer = g_timeout_add( interval, animation_tick, NULL );
+	if ( g_animationTimer == 0 && !g_animationPaused && g_animationActive ) {
+		g_animationTimer = g_timeout_add( PREVIEW_REPAINT_INTERVAL_MS, animation_tick, NULL );
 	}
 }
 
@@ -1078,10 +1158,12 @@ static void animation_clicked( GtkButton*, gpointer ){
 		g_source_remove( g_animationTimer );
 		g_animationTimer = 0;
 		g_animationPaused = true;
+		preview_clock_pause();
 		gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Play" );
 	}
 	else {
 		g_animationPaused = false;
+		preview_clock_resume();
 		start_animation_timer();
 		gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Pause" );
 	}
@@ -1185,12 +1267,12 @@ void ShaderShop_RefreshSelection(){
 			g_source_remove( g_animationTimer );
 			g_animationTimer = 0;
 		}
-		g_animationTick = 0;
+		preview_clock_reset();
 		g_animationPaused = false;
 		start_animation_timer();
 
 		if ( g_animationButton != NULL ) {
-			gtk_widget_set_sensitive( g_animationButton, g_animationClockFps > 0.0f );
+			gtk_widget_set_sensitive( g_animationButton, g_animationActive );
 			gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Pause" );
 		}
 
@@ -1323,10 +1405,13 @@ static bool stage_dimensions( const PreviewStage& stage, int& width, int& height
 static GLuint stage_texture( const PreviewStage& stage ){
 	if ( !stage.animationFrames.empty() ) {
 		unsigned int frameIndex = 0;
-		if ( stage.animationFrames.size() > 1 && stage.animationFps > 0.0f && g_animationClockFps > 0.0f ) {
+		if ( stage.animationFrames.size() > 1 && stage.animationFps > 0.0f ) {
+			// floor( time * frequency ) mod frameCount, per stage and in real
+			// time, so stages with different frequencies stay independent.
+			const double frame = floor( preview_seconds() * stage.animationFps );
 			frameIndex = static_cast<unsigned int>(
-				static_cast<double>( g_animationTick ) * stage.animationFps / g_animationClockFps
-			) % static_cast<unsigned int>( stage.animationFrames.size() );
+				fmod( frame, static_cast<double>( stage.animationFrames.size() ) )
+			);
 		}
 		return stage.animationFrames[frameIndex].uploaded ? stage.animationFrames[frameIndex].texture : 0;
 	}
@@ -1356,13 +1441,13 @@ static void draw_textured_quad( GLuint texture, float left, float bottom, float 
 	g_QglTable.m_pfn_qglEnd();
 }
 
-static float stage_wave( float base, float amplitude, float phase, float frequency ){
-	const float time = g_animationClockFps > 0.0f ? static_cast<float>( g_animationTick ) / g_animationClockFps : 0.0f;
-	return base + amplitude * sinf( 6.28318530718f * ( phase + time * frequency ) );
+static float stage_wave( WaveForm form, float base, float amplitude, float phase, float frequency ){
+	const float time = static_cast<float>( preview_seconds() );
+	return base + amplitude * wave_value( form, phase + time * frequency );
 }
 
 static float preview_time(){
-	return g_animationClockFps > 0.0f ? static_cast<float>( g_animationTick ) / g_animationClockFps : 0.0f;
+	return static_cast<float>( preview_seconds() );
 }
 
 static void draw_preview(){
@@ -1535,7 +1620,7 @@ static void draw_preview(){
 
 		g_QglTable.m_pfn_qglEnable( GL_BLEND );
 		g_QglTable.m_pfn_qglBlendFunc( blend_factor( stage->blendSrc ), blend_factor( stage->blendDst ) );
-		float brightness = stage->rgbWave ? stage_wave( stage->rgbBase, stage->rgbAmplitude, stage->rgbPhase, stage->rgbFrequency ) : 1.0f;
+		float brightness = stage->rgbWave ? stage_wave( stage->rgbWaveForm, stage->rgbBase, stage->rgbAmplitude, stage->rgbPhase, stage->rgbFrequency ) : 1.0f;
 		// The generated lightmap is a white 1x1; the stand-in level is applied as
 		// a colour multiplier so moving the control needs no texture rebuild.
 		if ( stage->generatedLightmap ) {
@@ -1543,7 +1628,7 @@ static void draw_preview(){
 		}
 		g_QglTable.m_pfn_qglColor4f( brightness, brightness, brightness, stage->alpha );
 		if ( stage->stretchWave || stage->scroll || stage->rotate || stage->scale || stage->transform ) {
-			const float stretch = stage_wave( stage->stretchBase, stage->stretchAmplitude, stage->stretchPhase, stage->stretchFrequency );
+			const float stretch = stage_wave( stage->stretchWaveForm, stage->stretchBase, stage->stretchAmplitude, stage->stretchPhase, stage->stretchFrequency );
 			g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE );
 			g_QglTable.m_pfn_qglLoadIdentity();
 			if ( stage->scroll ) g_QglTable.m_pfn_qglTranslatef( stage->scrollS * preview_time(), stage->scrollT * preview_time(), 0.0f );
