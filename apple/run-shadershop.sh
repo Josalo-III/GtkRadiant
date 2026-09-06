@@ -43,11 +43,11 @@ do
 	fi
 done
 
-echo "== building ShaderShop =="
+echo "== building GtkRadiant and ShaderShop =="
 # shellcheck disable=SC2086
 apple/macos-env.sh scons -j10 $scons_extra target=radiant \
 	cc=/usr/bin/clang cxx=/usr/bin/clang++ \
-	install/modules/shadershop.so
+	install/radiant.bin install/modules/shadershop.so
 
 if [ -e install/modules/shaderpreview.so ]; then
 	echo "error: install/modules/shaderpreview.so was recreated by the build" >&2

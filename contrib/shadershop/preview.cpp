@@ -1774,11 +1774,17 @@ static void draw_preview(){
 }
 
 static void render_preview(){
+#if !GTK_CHECK_VERSION( 3, 0, 0 )
 	if ( !g_UIGtkTable.m_pfn_glwidget_make_current( g_pPreviewWidget ) ) {
 		g_FuncTable.m_pfnSysFPrintf( SYS_ERR, "ShaderShop: failed to activate OpenGL context\n" );
 		return;
 	}
+#endif
 
+	// GtkGLArea has already made its context current and attached its FBO before
+	// it emits the GTK3 render signal. Re-entering the host helper here can
+	// attach a different buffer during the callback; GTK2 still needs the
+	// explicit GtkGLExt transition above.
 	draw_preview();
 	g_QglTable.m_pfn_QE_CheckOpenGLForErrors();
 }
