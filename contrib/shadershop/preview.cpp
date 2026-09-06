@@ -128,6 +128,24 @@ static int g_previewBufferHeight = 0;
 static const int PREVIEW_SIZE_RETRY_LIMIT = 8;
 static int g_previewSizeRetries = 0;
 
+// Every first-frame recovery path we have -- realize, map, configure, resize,
+// window creation -- ends in gtk_gl_area_queue_render(), and none of them can
+// tell whether the frame it asked for was ever delivered. When GTK drops the
+// request (the toplevel is not yet mapped, or the area has no allocation), a
+// static shader has no animation timer to ask again, so the area keeps its
+// undefined contents until unrelated damage -- a menu bar hover -- forces a
+// repaint. That is the white window on first load.
+//
+// So watch for the frame instead of assuming it. The watchdog re-queues on a
+// timer until draw_preview() reports a frame that reached a usable surface,
+// then stops. The budget bounds it: if the surface is never drawable, this
+// gives up rather than spinning.
+static const guint PREVIEW_FIRST_FRAME_INTERVAL_MS = 100;
+static const int PREVIEW_FIRST_FRAME_LIMIT = 30;
+static bool g_previewFrameDrawn = false;
+static int g_previewFrameWaits = 0;
+static guint g_previewFrameTimer = 0;
+
 // GL names of superseded textures. Deletion needs the preview context current,
 // which is only guaranteed inside the render callback, so retirement is
 // deferred to the start of the next frame rather than done from whichever UI
@@ -1147,6 +1165,27 @@ static void queue_preview_render(){
 #endif
 }
 
+static gboolean preview_first_frame_watchdog( gpointer ){
+	if ( g_pPreviewWidget == NULL || g_previewFrameDrawn || g_previewFrameWaits >= PREVIEW_FIRST_FRAME_LIMIT ) {
+		g_previewFrameTimer = 0;
+		return FALSE;
+	}
+
+	++g_previewFrameWaits;
+	queue_preview_render();
+	return TRUE;
+}
+
+// Called from every point that believes it has just asked for the first frame.
+// Cheap to call repeatedly: it is a no-op once a frame has actually landed.
+static void watch_for_first_frame(){
+	if ( g_pPreviewWidget == NULL || g_previewFrameDrawn || g_previewFrameTimer != 0 ) {
+		return;
+	}
+	g_previewFrameWaits = 0;
+	g_previewFrameTimer = g_timeout_add( PREVIEW_FIRST_FRAME_INTERVAL_MS, preview_first_frame_watchdog, NULL );
+}
+
 static void start_animation_timer(){
 	if ( g_animationTimer == 0 && !g_animationPaused && g_animationActive ) {
 		g_animationTimer = g_timeout_add( PREVIEW_REPAINT_INTERVAL_MS, animation_tick, NULL );
@@ -1477,6 +1516,7 @@ static void draw_preview(){
 	// A frame reached a usable surface, so the retry budget is spent on the
 	// next stall, not carried over from this one.
 	g_previewSizeRetries = 0;
+	g_previewFrameDrawn = true;
 
 	// The preview context is current here and nowhere else, so this is where
 	// superseded textures are actually released.
@@ -1722,6 +1762,7 @@ static void preview_realized( GtkWidget* widget, gpointer ){
 	// Queue once more from the GTK idle queue: realization can happen before
 	// allocation/map, in which case the first direct request is discarded.
 	g_idle_add( preview_idle_render, NULL );
+	watch_for_first_frame();
 }
 
 static gboolean preview_idle_render( gpointer ){
@@ -1736,6 +1777,7 @@ static gboolean preview_mapped_or_configured( GtkWidget*, GdkEvent*, gpointer ){
 	// request after map/configure is context-safe and avoids needing a resize or
 	// pointer hover to damage the first frame.
 	g_idle_add( preview_idle_render, NULL );
+	watch_for_first_frame();
 	return FALSE;
 }
 #else
@@ -1801,9 +1843,16 @@ static void preview_destroyed( GtkWidget*, gpointer ){
 	clear_stages();
 	clear_selected_image();
 
+	if ( g_previewFrameTimer != 0 ) {
+		g_source_remove( g_previewFrameTimer );
+		g_previewFrameTimer = 0;
+	}
+
 	g_previewBufferWidth = 0;
 	g_previewBufferHeight = 0;
 	g_previewSizeRetries = 0;
+	g_previewFrameDrawn = false;
+	g_previewFrameWaits = 0;
 
 	g_pPreviewWidget = NULL;
 	g_pSelectionLabel = NULL;
@@ -2377,6 +2426,7 @@ void ShaderShop_Show(){
 	// Ensure the first frame is requested after map/realize processing. Without
 	// this, GTK can defer the render until another widget causes damage.
 	g_idle_add( preview_idle_render, NULL );
+	watch_for_first_frame();
 #else
 	gtk_widget_queue_draw( g_pPreviewWidget );
 #endif
