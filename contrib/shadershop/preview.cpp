@@ -229,6 +229,30 @@ static bool parse_wave_form( const std::string& token, WaveForm& form ){
 // The engine stores a fixed number of animation frames per stage.
 static const size_t ANIMATION_FRAME_LIMIT = 8;
 
+// Keep tcMod directives as the shader wrote them. This ordered representation
+// is the source of truth for the fixed-function swatch today and the later
+// per-vertex evaluator.
+enum TcModKind
+{
+	TCMOD_SCROLL,
+	TCMOD_ROTATE,
+	TCMOD_SCALE,
+	TCMOD_TRANSFORM,
+	TCMOD_STRETCH
+};
+
+struct TcModOperation
+{
+	TcModKind kind;
+	WaveForm waveForm;
+	float values[6];
+	int sourceLine;
+
+	TcModOperation( TcModKind operationKind, int line ) : kind( operationKind ), waveForm( WAVE_SIN ), sourceLine( line ){
+		for ( int i = 0; i < 6; ++i ) values[i] = 0.0f;
+	}
+};
+
 struct PreviewStage
 {
 	std::string mapName;
@@ -243,23 +267,13 @@ struct PreviewStage
 	bool uploaded;
 	float animationFps;
 	bool rgbWave;
-	bool stretchWave;
 	WaveForm rgbWaveForm;
-	WaveForm stretchWaveForm;
-	bool scroll;
-	bool rotate;
-	bool scale;
-	bool transform;
 	bool environmentTexGen;
 	GLenum alphaFunction;
 	float alphaReference;
 	float alpha;
 	float rgbBase, rgbAmplitude, rgbPhase, rgbFrequency;
-	float stretchBase, stretchAmplitude, stretchPhase, stretchFrequency;
-	float scrollS, scrollT;
-	float rotateDegreesPerSecond;
-	float scaleS, scaleT;
-	float transformMatrix[6];
+	std::vector<TcModOperation> tcModOperations;
 	std::vector<std::string> animationNames;
 	std::vector<AnimationFrame> animationFrames;
 
@@ -274,15 +288,17 @@ struct PreviewStage
 		height( 0 ),
 		texture( 0 ),
 		uploaded( false ),
-		animationFps( 0.0f ), rgbWave( false ), stretchWave( false ), rgbWaveForm( WAVE_SIN ), stretchWaveForm( WAVE_SIN ), scroll( false ), rotate( false ), scale( false ), transform( false ), environmentTexGen( false ), alphaFunction( GL_ALWAYS ), alphaReference( 0.0f ), alpha( 1.0f ),
-		rgbBase( 1.0f ), rgbAmplitude( 0.0f ), rgbPhase( 0.0f ), rgbFrequency( 0.0f ),
-		stretchBase( 1.0f ), stretchAmplitude( 0.0f ), stretchPhase( 0.0f ), stretchFrequency( 0.0f ),
-		scrollS( 0.0f ), scrollT( 0.0f ), rotateDegreesPerSecond( 0.0f ), scaleS( 1.0f ), scaleT( 1.0f )
-	{
-		transformMatrix[0] = transformMatrix[3] = 1.0f;
-		transformMatrix[1] = transformMatrix[2] = transformMatrix[4] = transformMatrix[5] = 0.0f;
-	}
+		animationFps( 0.0f ), rgbWave( false ), rgbWaveForm( WAVE_SIN ), environmentTexGen( false ), alphaFunction( GL_ALWAYS ), alphaReference( 0.0f ), alpha( 1.0f ),
+		rgbBase( 1.0f ), rgbAmplitude( 0.0f ), rgbPhase( 0.0f ), rgbFrequency( 0.0f )
+	{}
 };
+
+static bool stage_has_animated_tcmod( const PreviewStage& stage ){
+	for ( std::vector<TcModOperation>::const_iterator operation = stage.tcModOperations.begin(); operation != stage.tcModOperations.end(); ++operation ) {
+		if ( operation->kind == TCMOD_SCROLL || operation->kind == TCMOD_ROTATE || operation->kind == TCMOD_STRETCH ) return true;
+	}
+	return false;
+}
 
 static std::vector<PreviewStage> g_stages;
 
@@ -703,7 +719,7 @@ static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClo
 		else {
 			shadershop_warn( "stage %d: no image source", stageNumber );
 		}
-		if ( updateClock && ( stage->rgbWave || stage->stretchWave || stage->scroll || stage->rotate ) ) {
+		if ( updateClock && ( stage->rgbWave || stage_has_animated_tcmod( *stage ) ) ) {
 			g_animationActive = true;
 		}
 	}
@@ -944,9 +960,10 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 					shadershop_warn( "stage %d: incomplete tcMod scroll", stageNumber );
 				}
 				else {
-					stage.scroll = true;
-					stage.scrollS = static_cast<float>( atof( s.c_str() ) );
-					stage.scrollT = static_cast<float>( atof( t.c_str() ) );
+					TcModOperation operation( TCMOD_SCROLL, directiveLine );
+					operation.values[0] = static_cast<float>( atof( s.c_str() ) );
+					operation.values[1] = static_cast<float>( atof( t.c_str() ) );
+					stage.tcModOperations.push_back( operation );
 				}
 				continue;
 			}
@@ -956,8 +973,9 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 					shadershop_warn( "stage %d: incomplete tcMod rotate", stageNumber );
 				}
 				else {
-					stage.rotate = true;
-					stage.rotateDegreesPerSecond = static_cast<float>( atof( rate.c_str() ) );
+					TcModOperation operation( TCMOD_ROTATE, directiveLine );
+					operation.values[0] = static_cast<float>( atof( rate.c_str() ) );
+					stage.tcModOperations.push_back( operation );
 				}
 				continue;
 			}
@@ -967,9 +985,10 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 					shadershop_warn( "stage %d: incomplete tcMod scale", stageNumber );
 				}
 				else {
-					stage.scale = true;
-					stage.scaleS = static_cast<float>( atof( s.c_str() ) );
-					stage.scaleT = static_cast<float>( atof( t.c_str() ) );
+					TcModOperation operation( TCMOD_SCALE, directiveLine );
+					operation.values[0] = static_cast<float>( atof( s.c_str() ) );
+					operation.values[1] = static_cast<float>( atof( t.c_str() ) );
+					stage.tcModOperations.push_back( operation );
 				}
 				continue;
 			}
@@ -979,8 +998,9 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 				for ( int i = 0; i < 6; ++i ) complete = complete && next_script_token_on_line( directiveLine, values[i] );
 				if ( !complete ) shadershop_warn( "stage %d: incomplete tcMod transform", stageNumber );
 				else {
-					stage.transform = true;
-					for ( int i = 0; i < 6; ++i ) stage.transformMatrix[i] = static_cast<float>( atof( values[i].c_str() ) );
+					TcModOperation operation( TCMOD_TRANSFORM, directiveLine );
+					for ( int i = 0; i < 6; ++i ) operation.values[i] = static_cast<float>( atof( values[i].c_str() ) );
+					stage.tcModOperations.push_back( operation );
 				}
 				continue;
 			}
@@ -993,7 +1013,10 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 			WaveForm form;
 			if ( !parse_wave_form( wave, form ) ) { shadershop_warn( "stage %d: waveform '%s' is not supported", stageNumber, wave.c_str() ); continue; }
 			const float b = static_cast<float>( atof( base.c_str() ) ), a = static_cast<float>( atof( amplitude.c_str() ) ), p = static_cast<float>( atof( phase.c_str() ) ), f = static_cast<float>( atof( frequency.c_str() ) );
-			stage.stretchWave = true; stage.stretchWaveForm = form; stage.stretchBase = b; stage.stretchAmplitude = a; stage.stretchPhase = p; stage.stretchFrequency = f;
+			TcModOperation operation( TCMOD_STRETCH, directiveLine );
+			operation.waveForm = form;
+			operation.values[0] = b; operation.values[1] = a; operation.values[2] = p; operation.values[3] = f;
+			stage.tcModOperations.push_back( operation );
 		}
 		else if ( keyword_equals( token, "rgbGen" ) ) {
 			std::string mode;
@@ -1154,21 +1177,11 @@ static gboolean animation_tick( gpointer ){
 	return TRUE;
 }
 
-static int g_diagQueueCalls = 0;
-
 static void queue_preview_render(){
 	if ( g_pPreviewWidget == NULL ) {
 		return;
 	}
 #if GTK_CHECK_VERSION( 3, 0, 0 )
-	if ( g_diagQueueCalls < 20 ) {
-		++g_diagQueueCalls;
-		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: queue_preview_render #%d realized=%d mapped=%d visible=%d\n",
-			g_diagQueueCalls,
-			gtk_widget_get_realized( g_pPreviewWidget ),
-			gtk_widget_get_mapped( g_pPreviewWidget ),
-			gtk_widget_get_visible( g_pPreviewWidget ) );
-	}
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
 	// queue_render only marks the widget as needing a repaint; actually
 	// producing one is left to the toplevel's GdkFrameClock, which on the
@@ -1180,9 +1193,6 @@ static void queue_preview_render(){
 	// now instead of waiting for a frame-clock tick that may not come.
 	if ( gtk_widget_get_realized( g_pPreviewWidget ) ) {
 		GdkWindow* window = gtk_widget_get_window( g_pPreviewWidget );
-		if ( g_diagQueueCalls <= 20 ) {
-			g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG:   process_updates window=%p\n", (void*)window );
-		}
 		if ( window != NULL ) {
 			gdk_window_process_updates( window, TRUE );
 		}
@@ -1194,8 +1204,6 @@ static void queue_preview_render(){
 
 static gboolean preview_first_frame_watchdog( gpointer ){
 	if ( g_pPreviewWidget == NULL || g_previewFrameDrawn || g_previewFrameWaits >= PREVIEW_FIRST_FRAME_LIMIT ) {
-		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: watchdog stopping, drawn=%d waits=%d\n",
-			g_previewFrameDrawn, g_previewFrameWaits );
 		g_previewFrameTimer = 0;
 		return FALSE;
 	}
@@ -1528,7 +1536,68 @@ static float preview_time(){
 	return static_cast<float>( preview_seconds() );
 }
 
-static int g_diagRenderCalls = 0;
+struct PreviewTexCoord
+{
+	float s;
+	float t;
+};
+
+// Q3 applies coordinate modifiers in declaration order. Keeping that rule in
+// one evaluator means the current swatch and the later tessellated inspection
+// mesh cannot quietly diverge.
+static PreviewTexCoord evaluate_stage_texcoord( const PreviewStage& stage, float s, float t, float elapsedSeconds ){
+	for ( std::vector<TcModOperation>::const_iterator operation = stage.tcModOperations.begin(); operation != stage.tcModOperations.end(); ++operation ) {
+		switch ( operation->kind ) {
+		case TCMOD_SCROLL:
+			s += operation->values[0] * elapsedSeconds;
+			t += operation->values[1] * elapsedSeconds;
+			break;
+		case TCMOD_ROTATE: {
+			const float radians = operation->values[0] * elapsedSeconds * 0.01745329251994329577f;
+			const float cosine = cosf( radians );
+			const float sine = sinf( radians );
+			const float centeredS = s - 0.5f;
+			const float centeredT = t - 0.5f;
+			s = 0.5f + cosine * centeredS - sine * centeredT;
+			t = 0.5f + sine * centeredS + cosine * centeredT;
+			break;
+		}
+		case TCMOD_SCALE:
+			s *= operation->values[0];
+			t *= operation->values[1];
+			break;
+		case TCMOD_TRANSFORM: {
+			const float sourceS = s;
+			s = operation->values[0] * sourceS + operation->values[1] * t + operation->values[4];
+			t = operation->values[2] * sourceS + operation->values[3] * t + operation->values[5];
+			break;
+		}
+		case TCMOD_STRETCH: {
+			const float stretch = operation->values[0] + operation->values[1] * wave_value( operation->waveForm, operation->values[2] + elapsedSeconds * operation->values[3] );
+			s = 0.5f + ( s - 0.5f ) * stretch;
+			t = 0.5f + ( t - 0.5f ) * stretch;
+			break;
+		}
+		}
+	}
+	PreviewTexCoord coordinate = { s, t };
+	return coordinate;
+}
+
+static void draw_stage_textured_quad( GLuint texture, const PreviewStage& stage, float left, float bottom, float right, float top ){
+	const float elapsedSeconds = preview_time();
+	const PreviewTexCoord bottomLeft = evaluate_stage_texcoord( stage, 0.0f, 1.0f, elapsedSeconds );
+	const PreviewTexCoord bottomRight = evaluate_stage_texcoord( stage, 1.0f, 1.0f, elapsedSeconds );
+	const PreviewTexCoord topRight = evaluate_stage_texcoord( stage, 1.0f, 0.0f, elapsedSeconds );
+	const PreviewTexCoord topLeft = evaluate_stage_texcoord( stage, 0.0f, 0.0f, elapsedSeconds );
+	g_QglTable.m_pfn_qglBindTexture( GL_TEXTURE_2D, texture );
+	g_QglTable.m_pfn_qglBegin( GL_QUADS );
+	g_QglTable.m_pfn_qglTexCoord2f( bottomLeft.s, bottomLeft.t ); g_QglTable.m_pfn_qglVertex2f( left, bottom );
+	g_QglTable.m_pfn_qglTexCoord2f( bottomRight.s, bottomRight.t ); g_QglTable.m_pfn_qglVertex2f( right, bottom );
+	g_QglTable.m_pfn_qglTexCoord2f( topRight.s, topRight.t ); g_QglTable.m_pfn_qglVertex2f( right, top );
+	g_QglTable.m_pfn_qglTexCoord2f( topLeft.s, topLeft.t ); g_QglTable.m_pfn_qglVertex2f( left, top );
+	g_QglTable.m_pfn_qglEnd();
+}
 
 static void draw_preview(){
 	// Prefer the size GtkGLArea reported for its own buffer; fall back to the
@@ -1541,8 +1610,6 @@ static void draw_preview(){
 	}
 
 	if ( width <= 0 || height <= 0 ) {
-		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: draw_preview surface not usable (buf %dx%d) retries=%d\n",
-			width, height, g_previewSizeRetries );
 		// The surface is not usable yet.  Clear anyway rather than returning
 		// into an undefined buffer, and ask for another frame: GtkGLArea will
 		// not repaint on its own, so a render that draws nothing and queues
@@ -1555,11 +1622,6 @@ static void draw_preview(){
 		}
 		return;
 	}
-	if ( g_diagRenderCalls <= 20 ) {
-		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: draw_preview drawing real frame %dx%d, %d stages\n",
-			width, height, static_cast<int>( g_stages.size() ) );
-	}
-
 	// A frame reached a usable surface, so the retry budget is spent on the
 	// next stall, not carried over from this one.
 	g_previewSizeRetries = 0;
@@ -1692,6 +1754,12 @@ static void draw_preview(){
 		draw_textured_quad( g_checkerboardTexture, left, bottom, right, top );
 	}
 
+	// Stage coordinates are supplied directly by evaluate_stage_texcoord. Do not
+	// inherit a texture matrix from another Radiant drawing path.
+	g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE );
+	g_QglTable.m_pfn_qglLoadIdentity();
+	g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
+
 	bool drewStage = false;
 	for ( std::vector<PreviewStage>::const_iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) {
 		// White stands in for a neutral lightmap only in the usual filter stage.
@@ -1714,29 +1782,6 @@ static void draw_preview(){
 			brightness *= g_lightmapLevel;
 		}
 		g_QglTable.m_pfn_qglColor4f( brightness, brightness, brightness, stage->alpha );
-		if ( stage->stretchWave || stage->scroll || stage->rotate || stage->scale || stage->transform ) {
-			const float stretch = stage_wave( stage->stretchWaveForm, stage->stretchBase, stage->stretchAmplitude, stage->stretchPhase, stage->stretchFrequency );
-			g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE );
-			g_QglTable.m_pfn_qglLoadIdentity();
-			if ( stage->scroll ) g_QglTable.m_pfn_qglTranslatef( stage->scrollS * preview_time(), stage->scrollT * preview_time(), 0.0f );
-			if ( stage->stretchWave ) {
-				g_QglTable.m_pfn_qglTranslatef( 0.5f, 0.5f, 0.0f );
-				g_QglTable.m_pfn_qglScalef( stretch, stretch, 1.0f );
-				g_QglTable.m_pfn_qglTranslatef( -0.5f, -0.5f, 0.0f );
-			}
-			if ( stage->rotate ) {
-				g_QglTable.m_pfn_qglTranslatef( 0.5f, 0.5f, 0.0f );
-				g_QglTable.m_pfn_qglRotatef( stage->rotateDegreesPerSecond * preview_time(), 0.0f, 0.0f, 1.0f );
-				g_QglTable.m_pfn_qglTranslatef( -0.5f, -0.5f, 0.0f );
-			}
-			if ( stage->scale ) g_QglTable.m_pfn_qglScalef( stage->scaleS, stage->scaleT, 1.0f );
-			if ( stage->transform ) {
-				const float* t = stage->transformMatrix;
-				const float matrix[16] = { t[0], t[2], 0, 0, t[1], t[3], 0, 0, 0, 0, 1, 0, t[4], t[5], 0, 1 };
-				g_QglTable.m_pfn_qglMultMatrixf( matrix );
-			}
-			g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW );
-		}
 		if ( stage->alphaFunction != GL_ALWAYS ) {
 			g_QglTable.m_pfn_qglEnable( GL_ALPHA_TEST );
 			g_QglTable.m_pfn_qglAlphaFunc( stage->alphaFunction, stage->alphaReference );
@@ -1753,13 +1798,12 @@ static void draw_preview(){
 			g_QglTable.m_pfn_qglEnable( GL_TEXTURE_GEN_S );
 			g_QglTable.m_pfn_qglEnable( GL_TEXTURE_GEN_T );
 		}
-		draw_textured_quad( texture, left, bottom, right, top );
+		draw_stage_textured_quad( texture, *stage, left, bottom, right, top );
 		if ( stage->environmentTexGen ) {
 			g_QglTable.m_pfn_qglDisable( GL_TEXTURE_GEN_S );
 			g_QglTable.m_pfn_qglDisable( GL_TEXTURE_GEN_T );
 		}
 		if ( stage->alphaFunction != GL_ALWAYS ) g_QglTable.m_pfn_qglDisable( GL_ALPHA_TEST );
-		if ( stage->stretchWave || stage->scroll || stage->rotate || stage->scale || stage->transform ) { g_QglTable.m_pfn_qglMatrixMode( GL_TEXTURE ); g_QglTable.m_pfn_qglLoadIdentity(); g_QglTable.m_pfn_qglMatrixMode( GL_MODELVIEW ); }
 		g_QglTable.m_pfn_qglColor4f( 1, 1, 1, 1 );
 		drewStage = true;
 	}
@@ -1793,10 +1837,6 @@ static void render_preview(){
 static gboolean preview_idle_render( gpointer );
 
 static gboolean preview_render( GtkGLArea*, GdkGLContext*, gpointer ){
-	if ( g_diagRenderCalls < 20 ) {
-		++g_diagRenderCalls;
-		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_render signal fired #%d\n", g_diagRenderCalls );
-	}
 	render_preview();
 	return TRUE;
 }
@@ -1805,7 +1845,6 @@ static gboolean preview_render( GtkGLArea*, GdkGLContext*, gpointer ){
 // real buffer dimensions.  It is the earliest point at which the surface is
 // genuinely drawable, which makes it the right trigger for the first frame.
 static void preview_gl_resize( GtkGLArea*, gint width, gint height, gpointer ){
-	g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_gl_resize %d x %d\n", width, height );
 	g_previewBufferWidth = width;
 	g_previewBufferHeight = height;
 	g_previewSizeRetries = 0;
@@ -1813,7 +1852,6 @@ static void preview_gl_resize( GtkGLArea*, gint width, gint height, gpointer ){
 }
 
 static void preview_realized( GtkWidget* widget, gpointer ){
-	g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_realized\n" );
 	// GtkGLArea creates its context during realization. Queueing before that
 	// point can be dropped, leaving the first frame waiting for unrelated UI
 	// damage such as button hover.
@@ -1935,6 +1973,28 @@ static void edit_shader_clicked( GtkButton*, gpointer ){
 }
 
 static gboolean refresh_selection_idle( gpointer ){
+	ShaderShop_RefreshSelection();
+	return FALSE;
+}
+
+static gboolean activate_and_refresh_idle( gpointer eventTime ){
+	if ( g_pPreviewWindow == NULL ) {
+		return FALSE;
+	}
+
+	const guint32 timestamp = GPOINTER_TO_UINT( eventTime );
+	// The initial present() happens before the X11 toplevel is mapped. Repeat
+	// the user-initiated activation once GTK has returned to its event loop,
+	// using the menu event's timestamp so the window manager accepts it as a
+	// legitimate focus request rather than focus stealing.
+	gtk_window_present_with_time( GTK_WINDOW( g_pPreviewWindow ), timestamp );
+	GdkWindow* window = gtk_widget_get_window( g_pPreviewWindow );
+	if ( window != NULL ) {
+		gdk_window_focus( window, timestamp );
+	}
+
+	// Load only after activation; the active toplevel owns the frame clock that
+	// will present the GtkGLArea buffer.
 	ShaderShop_RefreshSelection();
 	return FALSE;
 }
@@ -2347,6 +2407,7 @@ void ShaderShop_Show(){
 	g_inspectPanY = 0.0f;
 	g_inspectZoom = 1.0f;
 
+	const guint32 activationTime = gtk_get_current_event_time();
 	g_pPreviewWindow = gtk_window_new( GTK_WINDOW_TOPLEVEL );
 	gtk_window_set_title( GTK_WINDOW( g_pPreviewWindow ), "ShaderShop" );
 	gtk_window_set_default_size( GTK_WINDOW( g_pPreviewWindow ), 640, 500 );
@@ -2476,8 +2537,6 @@ void ShaderShop_Show(){
 	gtk_box_pack_end( GTK_BOX( controls ), refresh, FALSE, FALSE, 0 );
 	gtk_widget_show( refresh );
 
-	ShaderShop_RefreshSelection();
-
 	gtk_widget_show( g_pPreviewWindow );
 	// gtk_widget_show() does not guarantee the window becomes key on the
 	// quartz backend when it is transient for another window; present() is
@@ -2485,6 +2544,10 @@ void ShaderShop_Show(){
 	// it, and a not-yet-key window's frame clock is the mechanism behind
 	// the blank-until-clicked symptom this plugin has been chasing.
 	gtk_window_present( GTK_WINDOW( g_pPreviewWindow ) );
+	// Initial selection loading used to happen before show(), so its render
+	// request targeted an unrealized, unmapped GtkGLArea. Activate the mapped
+	// toplevel from idle first, then load and queue the actual shader frame.
+	g_idle_add( activate_and_refresh_idle, GUINT_TO_POINTER( activationTime ) );
 	gtk_widget_queue_resize( g_pPreviewWidget );
 #if GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );

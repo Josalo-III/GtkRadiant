@@ -845,6 +845,34 @@ rotation and pointer panning now operate on the material rather than on a window
 corner, and panning converts pointer pixels through the live view extents so a
 drag tracks the cursor at any zoom.
 
+### Credible 3D transform inspection
+
+The current 3D inspection control rotates a single material plane. That is
+useful for checking the response of a flat `tcGen environment` stage, but it
+does not yet make vertex-dependent effects credible: every vertex has the same
+normal relationship and there are too few samples to show a curved or turbulent
+surface. It must therefore remain a diagnostic view, not evidence that a shader
+with 3D transforms has been faithfully previewed.
+
+The next preview milestone is a tessellated material surface in inspection mode
+with a shared, ordered coordinate evaluator. The work is deliberately ordered:
+
+1. Preserve each `tcMod` directive in source order and evaluate that chain at
+   every vertex, rather than retaining independent scroll/rotate/scale fields.
+2. Render a sufficiently dense material grid in 3D inspection mode while
+   keeping the current 2D swatch as the exact compositing reference.
+3. Apply `deformVertexes wave` to that grid so orbit reveals genuine changing
+   shape, normals, and perspective.
+4. Add `tcMod turb` through the same per-vertex evaluator. It is a nonlinear
+   UV displacement and cannot be represented by the existing texture-matrix
+   shortcuts.
+
+`textures/outrage/runninglava` is the first acceptance shader: at an oblique
+orbit it must visibly ripple and scroll as one surface, without changing the
+stage order or compositing established by the 2D preview. This sequence puts
+the geometry needed to judge a 3D effect in place before expanding the language
+support that depends on it.
+
 ## Stage ownership rule
 
 The preview stage is the unit of shader rendering state.
@@ -870,7 +898,9 @@ PreviewStage
     blend state
     later: alphaFunc
     later: rgbGen / alphaGen
-    later: tcGen / ordered tcMod
+    tcGen
+    tcMod operations (ordered source list)
+    later: deformVertexes / surface geometry
     later: depth state
 ```
 
@@ -1162,8 +1192,11 @@ order-dependent. The current implementation applies scroll, stretch, rotate,
 scale, and transform in a fixed sequence written into the renderer, which is
 only accidentally correct when a stage happens to list them that way. The stage
 model needs an ordered list of `tcMod` operations, not a set of independent
-flags. Note that the corpus spells the keyword `tcmod` 1,800 times
-against `tcMod` 4,004, so case folding is a prerequisite here too.
+flags, and both the 2D and tessellated 3D paths must use that same evaluator.
+That is also the prerequisite for `tcMod turb`: turbulence is nonlinear,
+time-dependent per-vertex UV displacement rather than another matrix entry.
+Note that the corpus spells the keyword `tcmod` 1,800 times against `tcMod`
+4,004, so case folding is a prerequisite here too.
 
 When `rgbGen` arrives, its default is not constant: section 6.3 selects
 `identityLighting` for additive and blended stages and `identity` for filter
@@ -1511,12 +1544,60 @@ picture.
 6. ~~**Make preview time elapsed-time based.**~~ Done. Time is monotonic
    elapsed seconds, paused and resumed with the transport; the timer only asks
    for repaints.
-7. **Give `tcMod` a real ordered list** rather than independent flags applied in
-   a fixed renderer sequence.
-8. Generate `$whiteimage` once the Radiant/build consumer confirms the
+7. **Give `tcMod` a real ordered list and shared evaluator** rather than
+   independent flags applied in a fixed renderer sequence.
+8. **Make 3D inspection a tessellated material surface** and support
+   `deformVertexes wave`; retain the 2D swatch as the compositing reference.
+9. **Add `tcMod turb`** to that evaluator, with `runninglava` inspected at an
+   oblique angle as the first acceptance case.
+10. Generate `$whiteimage` once the Radiant/build consumer confirms the
    documented behaviour.
-9. Restore the GTK 2 build by guarding GTK 3-only layout calls.
-10. Move native verification fully up to the ScriptLib-backed stage interpreter.
+11. Restore the GTK 2 build by guarding GTK 3-only layout calls.
+12. Move native verification fully up to the ScriptLib-backed stage interpreter.
+
+### Implementation order: transform-capable preview
+
+This is the work order for the next preview tranche. Each slice leaves a useful
+preview running on the legacy OpenGL path used by GTK 2 and GTK 3; it must not
+depend on shaders, framebuffer objects, or a platform-specific GL context.
+
+1. ~~**Introduce the ordered stage model, without changing the picture.**~~
+   Done. Every supported `tcMod` is now an operation record in source order,
+   retaining its arguments and source location.
+2. ~~**Add one coordinate evaluator.**~~ Done for the 2D swatch. Given a
+   source UV, elapsed time, and an ordered operation list, it returns the
+   transformed UV and supplies it directly to the fixed-function vertices.
+   Scroll, scale, rotate, stretch, and transform no longer pass through a
+   texture matrix or independent stage fields. Acceptance still needs native
+   visual confirmation with deliberately reversed directive pairs: swapping
+   `scroll` and `rotate` must change the result in script order.
+3. **Introduce a reusable tessellated material mesh for 3D inspection.** Keep
+   the 2D view as the low-cost reference view, but draw an evenly subdivided
+   grid in inspection mode using the same fixed-function, cross-platform GL
+   calls as the existing quad. Evaluate UVs at its vertices and preserve orbit,
+   pan, zoom, aspect ratio, stage order, alpha testing, and blend state.
+   Acceptance: an affine multi-stage shader looks equivalent in 2D and in a
+   front-on 3D view, while an oblique orbit makes the mesh geometry evident.
+4. **Parse and render `deformVertexes wave`.** Evaluate the existing waveform
+   functions against each grid vertex, recompute a usable normal from nearby
+   displaced vertices, and leave unsupported deform forms visibly reported.
+   Acceptance: a wave-deformed fixture changes silhouette and lighting/texgen
+   response as it animates under orbit; it is not merely a projected UV change.
+5. **Add `tcMod turb`.** Implement Quake III's time-dependent turbulent UV
+   displacement in the shared evaluator; it is evaluated per mesh vertex, not
+   approximated by a texture matrix. Acceptance: `textures/outrage/runninglava`
+   ripples and scrolls continuously at an oblique orbit while retaining its
+   established composite in 2D.
+6. **Broaden only from observed failures.** Next candidates are `tcGen vector`,
+   further `deformVertexes` forms, and a curved inspection mesh for environment
+   mapping. Each gets a named corpus shader and acceptance observation before it
+   is implemented; unsupported directives stay explicit rather than silently
+   approximated.
+7. **Begin the editor foundation once this representation is stable.** Build an
+   in-memory `ShaderDocument` from the selected VFS source, preserve a lossless
+   editable copy, and make save an explicit loose-file Save As/replace action.
+   That editor model must consume the same ordered stage representation, never
+   mutate a packaged or VFS source in place.
 
 Items 1 through 3 were all the same underlying discipline, and all three are now
 done: the preview does not let its own scaffolding — background, placeholder, or
