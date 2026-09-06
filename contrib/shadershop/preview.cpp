@@ -1160,6 +1160,20 @@ static void queue_preview_render(){
 	}
 #if GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
+	// queue_render only marks the widget as needing a repaint; actually
+	// producing one is left to the toplevel's GdkFrameClock, which on the
+	// quartz backend ticks on the display link of the window that owns it.
+	// A newly-shown or not-yet-key window is not guaranteed to be driving
+	// that link yet, so a queued render can sit unpainted indefinitely --
+	// which is exactly what selecting the window (clicking its title bar)
+	// was fixing by making it key. Ask GDK to run the paint cycle right
+	// now instead of waiting for a frame-clock tick that may not come.
+	if ( gtk_widget_get_realized( g_pPreviewWidget ) ) {
+		GdkWindow* window = gtk_widget_get_window( g_pPreviewWidget );
+		if ( window != NULL ) {
+			gdk_window_process_updates( window, TRUE );
+		}
+	}
 #else
 	gtk_widget_queue_draw( g_pPreviewWidget );
 #endif
@@ -2430,6 +2444,12 @@ void ShaderShop_Show(){
 	ShaderShop_RefreshSelection();
 
 	gtk_widget_show( g_pPreviewWindow );
+	// gtk_widget_show() does not guarantee the window becomes key on the
+	// quartz backend when it is transient for another window; present() is
+	// the same call the "already open" branch above uses to raise and focus
+	// it, and a not-yet-key window's frame clock is the mechanism behind
+	// the blank-until-clicked symptom this plugin has been chasing.
+	gtk_window_present( GTK_WINDOW( g_pPreviewWindow ) );
 	gtk_widget_queue_resize( g_pPreviewWidget );
 #if GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
