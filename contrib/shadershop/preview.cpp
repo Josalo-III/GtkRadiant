@@ -1154,11 +1154,21 @@ static gboolean animation_tick( gpointer ){
 	return TRUE;
 }
 
+static int g_diagQueueCalls = 0;
+
 static void queue_preview_render(){
 	if ( g_pPreviewWidget == NULL ) {
 		return;
 	}
 #if GTK_CHECK_VERSION( 3, 0, 0 )
+	if ( g_diagQueueCalls < 20 ) {
+		++g_diagQueueCalls;
+		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: queue_preview_render #%d realized=%d mapped=%d visible=%d\n",
+			g_diagQueueCalls,
+			gtk_widget_get_realized( g_pPreviewWidget ),
+			gtk_widget_get_mapped( g_pPreviewWidget ),
+			gtk_widget_get_visible( g_pPreviewWidget ) );
+	}
 	gtk_gl_area_queue_render( GTK_GL_AREA( g_pPreviewWidget ) );
 	// queue_render only marks the widget as needing a repaint; actually
 	// producing one is left to the toplevel's GdkFrameClock, which on the
@@ -1170,6 +1180,9 @@ static void queue_preview_render(){
 	// now instead of waiting for a frame-clock tick that may not come.
 	if ( gtk_widget_get_realized( g_pPreviewWidget ) ) {
 		GdkWindow* window = gtk_widget_get_window( g_pPreviewWidget );
+		if ( g_diagQueueCalls <= 20 ) {
+			g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG:   process_updates window=%p\n", (void*)window );
+		}
 		if ( window != NULL ) {
 			gdk_window_process_updates( window, TRUE );
 		}
@@ -1181,6 +1194,8 @@ static void queue_preview_render(){
 
 static gboolean preview_first_frame_watchdog( gpointer ){
 	if ( g_pPreviewWidget == NULL || g_previewFrameDrawn || g_previewFrameWaits >= PREVIEW_FIRST_FRAME_LIMIT ) {
+		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: watchdog stopping, drawn=%d waits=%d\n",
+			g_previewFrameDrawn, g_previewFrameWaits );
 		g_previewFrameTimer = 0;
 		return FALSE;
 	}
@@ -1513,6 +1528,8 @@ static float preview_time(){
 	return static_cast<float>( preview_seconds() );
 }
 
+static int g_diagRenderCalls = 0;
+
 static void draw_preview(){
 	// Prefer the size GtkGLArea reported for its own buffer; fall back to the
 	// allocation only before the first resize has been seen.
@@ -1524,6 +1541,8 @@ static void draw_preview(){
 	}
 
 	if ( width <= 0 || height <= 0 ) {
+		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: draw_preview surface not usable (buf %dx%d) retries=%d\n",
+			width, height, g_previewSizeRetries );
 		// The surface is not usable yet.  Clear anyway rather than returning
 		// into an undefined buffer, and ask for another frame: GtkGLArea will
 		// not repaint on its own, so a render that draws nothing and queues
@@ -1535,6 +1554,10 @@ static void draw_preview(){
 			queue_preview_render();
 		}
 		return;
+	}
+	if ( g_diagRenderCalls <= 20 ) {
+		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: draw_preview drawing real frame %dx%d, %d stages\n",
+			width, height, static_cast<int>( g_stages.size() ) );
 	}
 
 	// A frame reached a usable surface, so the retry budget is spent on the
@@ -1764,6 +1787,10 @@ static void render_preview(){
 static gboolean preview_idle_render( gpointer );
 
 static gboolean preview_render( GtkGLArea*, GdkGLContext*, gpointer ){
+	if ( g_diagRenderCalls < 20 ) {
+		++g_diagRenderCalls;
+		g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_render signal fired #%d\n", g_diagRenderCalls );
+	}
 	render_preview();
 	return TRUE;
 }
@@ -1772,6 +1799,7 @@ static gboolean preview_render( GtkGLArea*, GdkGLContext*, gpointer ){
 // real buffer dimensions.  It is the earliest point at which the surface is
 // genuinely drawable, which makes it the right trigger for the first frame.
 static void preview_gl_resize( GtkGLArea*, gint width, gint height, gpointer ){
+	g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_gl_resize %d x %d\n", width, height );
 	g_previewBufferWidth = width;
 	g_previewBufferHeight = height;
 	g_previewSizeRetries = 0;
@@ -1779,6 +1807,7 @@ static void preview_gl_resize( GtkGLArea*, gint width, gint height, gpointer ){
 }
 
 static void preview_realized( GtkWidget* widget, gpointer ){
+	g_FuncTable.m_pfnSysFPrintf( SYS_STD, "ShaderShop DIAG: preview_realized\n" );
 	// GtkGLArea creates its context during realization. Queueing before that
 	// point can be dropped, leaving the first frame waiting for unrelated UI
 	// damage such as button hover.
