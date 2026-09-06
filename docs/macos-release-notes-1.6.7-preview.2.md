@@ -50,16 +50,28 @@ using **Open** from the Finder context menu on first launch.
 
 ## Validation completed
 
-- Preview 1's launch, rendering and compile gates re-run against this build.
-- Texture browser renders on its configured background with legible labels.
-- Repeated open, close and resize of the editor's OpenGL views without blank
-  frames.
-- Shader stages compositing against a known dark material now match the game
-  rather than washing toward white.
+- Editor builds, launches and runs under XQuartz on Apple silicon from this
+  tree.
+- Texture browser renders on its configured background with legible labels,
+  where Preview 1 showed white text on a white field.
+- A known dark texture that Preview 1 displayed as pale now reads correctly;
+  materials ending on an alpha-blended pass no longer wash toward white.
 
-The bundle has not been tested on a clean Mac without the build-time MacPorts
-installation. Please report packaging and XQuartz failures with the macOS crash
-report and `radiant.log` when available.
+## Not established by this build
+
+- **The intermittent blank view is not confirmed fixed.**
+  `gtk_gl_area_attach_buffers()` was called nowhere in the port, which is a
+  real defect and produces exactly this class of symptom, but the fault
+  appeared at random and has not been reproduced enough times since to call it
+  settled. If a view still opens blank, please report it along with any console
+  output.
+- Preview 1's compiler gates (Q3Map2 VIS/light, BSPC AAS generation) were not
+  re-run. Nothing in this release touches the compilers.
+- The bundle has not been tested on a clean Mac without the build-time MacPorts
+  installation.
+
+Please report packaging and XQuartz failures with the macOS crash report and
+`radiant.log` when available.
 
 SHA-256 (`GtkRadiant-1.6.7-preview.2.dmg`):
 
