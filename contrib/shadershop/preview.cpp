@@ -1356,7 +1356,17 @@ void ShaderShop_RefreshSelection(){
 		}
 	}
 
+	// g_previewFrameDrawn is a latch on "has a frame reached the screen since
+	// the last thing that could invalidate it", not "since the window opened".
+	// A shader switch is exactly such an invalidation: the queue_render() below
+	// is a single request, as fragile as the very first one was, and a large or
+	// complex shader is the case most likely to have it land at a moment GTK
+	// drops it (mid-allocate, mid-realize). Re-arm the watchdog here so a
+	// dropped request for THIS selection gets asked for again, instead of
+	// relying on the previous selection's frame having already latched true.
+	g_previewFrameDrawn = false;
 	queue_preview_render();
+	watch_for_first_frame();
 }
 
 static void ensure_checkerboard_texture(){
