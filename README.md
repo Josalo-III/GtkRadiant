@@ -5,6 +5,26 @@ GtkRadiant
 
 GtkRadiant is an open-source, cross-platform level editor for id Tech based games. It comes with some map compilers and data authoring tools.
 
+macOS (Apple silicon) preview builds
+-----------------------------------
+
+This fork carries an in-progress restoration of GtkRadiant 1.6.7 on Apple
+silicon, running under GTK3 and XQuartz. Preview disk images are published on
+the [Releases page](https://github.com/Josalo-III/GtkRadiant/releases):
+
+| Build | Notes | Status |
+| --- | --- | --- |
+| **[Preview 2](https://github.com/Josalo-III/GtkRadiant/releases/tag/v1.6.7-macos-arm64-preview.2)** | [release notes](docs/macos-release-notes-1.6.7-preview.2.md) | current |
+| [Preview 1](https://github.com/Josalo-III/GtkRadiant/releases/tag/v1.6.7-macos-arm64-preview.1) | [release notes](docs/macos-release-notes-1.6.7-preview.1.md) | superseded |
+
+These require an Apple-silicon Mac on macOS 11 or newer and XQuartz 2.8.6 or
+later. They are ad-hoc signed but **not** Apple-notarized, so first launch needs
+**Open** from the Finder context menu. Each release publishes a SHA-256 for its
+disk image. Game data is not included.
+
+The port's design decisions and running journal are in
+[docs/macos-port-plan.md](docs/macos-port-plan.md).
+
 Downloads
 ---------
 

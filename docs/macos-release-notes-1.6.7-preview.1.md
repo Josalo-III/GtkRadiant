@@ -38,6 +38,6 @@ The bundle has not yet been tested on a clean Mac without the build-time
 MacPorts installation. Please report packaging and XQuartz failures with the
 macOS crash report and `radiant.log` when available.
 
-SHA-256 (`GtkRadiant-1.6.7-preview.1.dmg`, published as `GtkRadiant-1.6.7.dmg`):
+SHA-256 (`GtkRadiant-1.6.7-preview.1.dmg`):
 
 `b71bf657105cc2689561ba709861722e539a666ef9a00651f8d21ddad9a9ce1a`
