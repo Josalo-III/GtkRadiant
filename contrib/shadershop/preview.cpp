@@ -23,6 +23,17 @@ static GtkWidget* g_pPreviewWindow = NULL;
 static GtkWidget* g_pPreviewWidget = NULL;
 static GtkWidget* g_pSelectionLabel = NULL;
 static GtkWidget* g_stageLabel = NULL;
+static GtkWidget* g_pEditorWindow = NULL;
+static GtkWidget* g_editorStageStack = NULL;
+static GtkWidget* g_editorStatusLabel = NULL;
+static bool g_editorRebuilding = false;
+static bool g_editorDirty = false;
+static GtkWidget* g_editorDropMarker = NULL;
+static int g_editorDragIndex = -1;
+static int g_editorDropIndex = -1;
+static bool g_editorDropAfter = false;
+
+static void rebuild_editor_stage_stack();
 static GtkWidget* g_animationButton = NULL;
 static GtkWidget* g_3dInspectButton = NULL;
 static GtkWidget* g_backdropButton = NULL;
@@ -238,7 +249,8 @@ enum TcModKind
 	TCMOD_ROTATE,
 	TCMOD_SCALE,
 	TCMOD_TRANSFORM,
-	TCMOD_STRETCH
+	TCMOD_STRETCH,
+	TCMOD_TURB
 };
 
 struct TcModOperation
@@ -295,12 +307,76 @@ struct PreviewStage
 
 static bool stage_has_animated_tcmod( const PreviewStage& stage ){
 	for ( std::vector<TcModOperation>::const_iterator operation = stage.tcModOperations.begin(); operation != stage.tcModOperations.end(); ++operation ) {
-		if ( operation->kind == TCMOD_SCROLL || operation->kind == TCMOD_ROTATE || operation->kind == TCMOD_STRETCH ) return true;
+		if ( operation->kind == TCMOD_SCROLL || operation->kind == TCMOD_ROTATE || operation->kind == TCMOD_STRETCH ||
+			 ( operation->kind == TCMOD_TURB && operation->values[1] != 0.0f && operation->values[3] != 0.0f ) ) return true;
+	}
+	return false;
+}
+
+static bool stage_requires_tessellated_preview( const PreviewStage& stage ){
+	for ( std::vector<TcModOperation>::const_iterator operation = stage.tcModOperations.begin(); operation != stage.tcModOperations.end(); ++operation ) {
+		if ( operation->kind == TCMOD_TURB ) return true;
 	}
 	return false;
 }
 
 static std::vector<PreviewStage> g_stages;
+
+// deformVertexes belongs to the material rather than to an individual stage.
+// The preview keeps its wave declarations separately so every rendered stage
+// shares the same displaced inspection surface.
+struct PreviewDeformWave
+{
+	float spread;
+	WaveForm waveForm;
+	float base;
+	float amplitude;
+	float phase;
+	float frequency;
+	int sourceLine;
+
+	PreviewDeformWave() : spread( 0.0f ), waveForm( WAVE_SIN ), base( 0.0f ), amplitude( 0.0f ), phase( 0.0f ), frequency( 0.0f ), sourceLine( 0 ){}
+};
+
+static std::vector<PreviewDeformWave> g_deformWaves;
+
+struct PreviewDeformMove
+{
+	float direction[3];
+	WaveForm waveForm;
+	float base;
+	float amplitude;
+	float phase;
+	float frequency;
+	int sourceLine;
+
+	PreviewDeformMove() : waveForm( WAVE_SIN ), base( 0.0f ), amplitude( 0.0f ), phase( 0.0f ), frequency( 0.0f ), sourceLine( 0 ){
+		direction[0] = direction[1] = direction[2] = 0.0f;
+	}
+};
+
+struct PreviewDeformNormal
+{
+	float amplitude;
+	float frequency;
+	int sourceLine;
+
+	PreviewDeformNormal() : amplitude( 0.0f ), frequency( 0.0f ), sourceLine( 0 ){}
+};
+
+struct PreviewDeformBulge
+{
+	float width;
+	float height;
+	float speed;
+	int sourceLine;
+
+	PreviewDeformBulge() : width( 0.0f ), height( 0.0f ), speed( 0.0f ), sourceLine( 0 ){}
+};
+
+static std::vector<PreviewDeformMove> g_deformMoves;
+static std::vector<PreviewDeformNormal> g_deformNormals;
+static std::vector<PreviewDeformBulge> g_deformBulges;
 
 // A backdrop may be a plain image or a whole shader. Most of the interesting
 // ones are shaders: an overlay is authored against another material, and that
@@ -371,7 +447,10 @@ static double preview_seconds(){
 
 static void preview_clock_reset(){
 	g_animationElapsed = 0.0;
-	g_animationResumed = g_animationPaused ? 0 : g_get_monotonic_time();
+	// Start only after the selected material has reached the GL context.  Asset
+	// decoding and the first texture uploads are not animation time; counting
+	// them made fast tcMod rotate materials visibly begin at a late phase.
+	g_animationResumed = 0;
 }
 
 static void preview_clock_pause(){
@@ -408,8 +487,30 @@ static void clear_stage_list( std::vector<PreviewStage>& stages ){
 	stages.clear();
 }
 
+static void clear_stage_images( PreviewStage& stage ){
+	if ( stage.pixels != NULL ) {
+		g_free( stage.pixels );
+		stage.pixels = NULL;
+	}
+	retire_texture( stage.texture );
+	stage.uploaded = false;
+	for ( std::vector<AnimationFrame>::iterator frame = stage.animationFrames.begin(); frame != stage.animationFrames.end(); ++frame ) {
+		if ( frame->pixels != NULL ) {
+			g_free( frame->pixels );
+			frame->pixels = NULL;
+		}
+		retire_texture( frame->texture );
+		frame->uploaded = false;
+	}
+	stage.animationFrames.clear();
+}
+
 static void clear_stages(){
 	clear_stage_list( g_stages );
+	g_deformWaves.clear();
+	g_deformMoves.clear();
+	g_deformNormals.clear();
+	g_deformBulges.clear();
 	g_animationActive = false;
 }
 
@@ -539,6 +640,14 @@ static bool stage_multiplies_destination( const PreviewStage& stage ){
 	return dst == GL_SRC_COLOR || dst == GL_ONE_MINUS_SRC_COLOR;
 }
 
+// The usual lightmap filter is neutral over white. Other destination-reading
+// blends are more useful over the checkerboard by default: it is not a scene
+// composite, but it keeps translucent water visible until a real backdrop is
+// selected.
+static bool stage_uses_lightmap_filter( const PreviewStage& stage ){
+	return blend_factor( stage.blendSrc ) == GL_DST_COLOR && blend_factor( stage.blendDst ) == GL_ZERO;
+}
+
 static bool stage_adds_destination( const PreviewStage& stage ){
 	const GLenum dst = blend_factor( stage.blendDst );
 	return dst != GL_ZERO && dst != GL_ONE_MINUS_SRC_ALPHA;
@@ -603,12 +712,14 @@ static void classify_destination_use(){
 	// stage was an ordinary opaque or alpha-blended texture, so a dark material
 	// read as a pale one.
 	bool multiplies = false;
+	bool lightmapFilter = false;
 	bool adds = false;
 	for ( std::vector<PreviewStage>::const_iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) {
 		if ( !stage_is_drawn( *stage ) ) {
 			continue;
 		}
 		multiplies = stage_multiplies_destination( *stage );
+		lightmapFilter = multiplies && stage_uses_lightmap_filter( *stage );
 		adds = !multiplies && stage_adds_destination( *stage );
 		break;
 	}
@@ -631,11 +742,19 @@ static void classify_destination_use(){
 		break;
 	}
 
-	// A multiplying stage loses everything against a dark field, while an adding
-	// stage merely washes against a light one, so multiplication decides when a
-	// stack does both.
+	// The filter lightmap needs white to remain neutral. Other destination-
+	// reading stages, especially water, open over the checkerboard for a useful
+	// default inspection view; users can select a scene-style backdrop when the
+	// exact destination composite matters.
 	if ( multiplies ) {
-		g_previewBackdrop = BACKDROP_LIGHTMAP;
+		if ( lightmapFilter ) {
+			g_previewBackdrop = BACKDROP_LIGHTMAP;
+			shadershop_warn( "stack multiplies its destination; shown over a uniform lightmap backdrop" );
+		}
+		else {
+			g_previewBackdrop = BACKDROP_CHECKER;
+			shadershop_warn( "stack multiplies its destination; shown over the checkerboard for visibility (select a backdrop for scene-composite fidelity)" );
+		}
 	}
 	else if ( adds ) {
 		g_previewBackdrop = BACKDROP_DARK;
@@ -645,22 +764,15 @@ static void classify_destination_use(){
 		return;
 	}
 
-	shadershop_warn(
-		"stack %s its destination; shown over a uniform %s backdrop because a "
-		"checkerboard would be blended into the material",
-		multiplies ? "multiplies" : "adds to",
-		multiplies ? "lightmap" : "dark"
-	);
+	if ( adds ) {
+		shadershop_warn( "stack adds to its destination; shown over a uniform dark backdrop" );
+	}
 }
 
 
 // `updateClock` is false for a backdrop stack: it may animate, but it must not
 // redefine the preview clock the selected shader is being judged against.
 static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClock ){
-	if ( updateClock ) {
-		g_animationActive = false;
-	}
-
 	int stageNumber = 0;
 	for ( std::vector<PreviewStage>::iterator stage = stages.begin(); stage != stages.end(); ++stage ) {
 		++stageNumber;
@@ -781,7 +893,11 @@ static bool name_equals( const std::string& token, const char* name ){
 // rather than writing to module state.  The buffer is handed to ScriptLib as-is
 // and is not owned here.
 static bool parse_definition_into( char* source, const char* shaderName, const char* sourceName,
-								   std::vector<PreviewStage>& stages, std::string* editorImage ){
+								   std::vector<PreviewStage>& stages, std::string* editorImage,
+								   std::vector<PreviewDeformWave>* deformWaves,
+								   std::vector<PreviewDeformMove>* deformMoves,
+								   std::vector<PreviewDeformNormal>* deformNormals,
+								   std::vector<PreviewDeformBulge>* deformBulges ){
 	g_ScripLibTable.m_pfnStartTokenParsing( source );
 	int depth = 0;
 	int currentStage = -1;
@@ -833,6 +949,85 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 			std::string imageName;
 			if ( next_script_token_on_line( g_ScripLibTable.m_pfnScriptLine(), imageName ) ) {
 				if ( editorImage != NULL ) *editorImage = imageName;
+			}
+			continue;
+		}
+
+		if ( depth == 1 && keyword_equals( token, "deformVertexes" ) ) {
+			const int directiveLine = g_ScripLibTable.m_pfnScriptLine();
+			std::string mode;
+			if ( !next_script_token_on_line( directiveLine, mode ) ) {
+				shadershop_warn( "deformVertexes has no mode" );
+				continue;
+			}
+			if ( keyword_equals( mode, "wave" ) ) {
+				std::string spread, wave, base, amplitude, phase, frequency;
+				if ( !next_script_token_on_line( directiveLine, spread ) || !next_script_token_on_line( directiveLine, wave ) || !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
+					shadershop_warn( "incomplete deformVertexes wave" );
+					continue;
+				}
+				WaveForm form;
+				if ( !parse_wave_form( wave, form ) ) {
+					shadershop_warn( "deformVertexes waveform '%s' is not supported", wave.c_str() );
+					continue;
+				}
+				if ( deformWaves != NULL ) {
+					PreviewDeformWave deform;
+					deform.spread = static_cast<float>( atof( spread.c_str() ) );
+					deform.waveForm = form;
+					deform.base = static_cast<float>( atof( base.c_str() ) );
+					deform.amplitude = static_cast<float>( atof( amplitude.c_str() ) );
+					deform.phase = static_cast<float>( atof( phase.c_str() ) );
+					deform.frequency = static_cast<float>( atof( frequency.c_str() ) );
+					deform.sourceLine = directiveLine;
+					if ( deform.spread == 0.0f ) shadershop_warn( "deformVertexes wave has zero spread" );
+					else deformWaves->push_back( deform );
+				}
+			}
+			else if ( keyword_equals( mode, "move" ) ) {
+				std::string values[8];
+				bool complete = true;
+				for ( int i = 0; i < 8; ++i ) complete = complete && next_script_token_on_line( directiveLine, values[i] );
+				WaveForm form;
+				if ( !complete ) shadershop_warn( "incomplete deformVertexes move" );
+				else if ( !parse_wave_form( values[3], form ) ) shadershop_warn( "deformVertexes move waveform '%s' is not supported", values[3].c_str() );
+				else if ( deformMoves != NULL ) {
+					PreviewDeformMove deform;
+					for ( int i = 0; i < 3; ++i ) deform.direction[i] = static_cast<float>( atof( values[i].c_str() ) );
+					deform.waveForm = form;
+					deform.base = static_cast<float>( atof( values[4].c_str() ) );
+					deform.amplitude = static_cast<float>( atof( values[5].c_str() ) );
+					deform.phase = static_cast<float>( atof( values[6].c_str() ) );
+					deform.frequency = static_cast<float>( atof( values[7].c_str() ) );
+					deform.sourceLine = directiveLine;
+					deformMoves->push_back( deform );
+				}
+			}
+			else if ( keyword_equals( mode, "normal" ) ) {
+				std::string amplitude, frequency;
+				if ( !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, frequency ) ) shadershop_warn( "incomplete deformVertexes normal" );
+				else if ( deformNormals != NULL ) {
+					PreviewDeformNormal deform;
+					deform.amplitude = static_cast<float>( atof( amplitude.c_str() ) );
+					deform.frequency = static_cast<float>( atof( frequency.c_str() ) );
+					deform.sourceLine = directiveLine;
+					deformNormals->push_back( deform );
+				}
+			}
+			else if ( keyword_equals( mode, "bulge" ) ) {
+				std::string width, height, speed;
+				if ( !next_script_token_on_line( directiveLine, width ) || !next_script_token_on_line( directiveLine, height ) || !next_script_token_on_line( directiveLine, speed ) ) shadershop_warn( "incomplete deformVertexes bulge" );
+				else if ( deformBulges != NULL ) {
+					PreviewDeformBulge deform;
+					deform.width = static_cast<float>( atof( width.c_str() ) );
+					deform.height = static_cast<float>( atof( height.c_str() ) );
+					deform.speed = static_cast<float>( atof( speed.c_str() ) );
+					deform.sourceLine = directiveLine;
+					deformBulges->push_back( deform );
+				}
+			}
+			else {
+				shadershop_warn( "deformVertexes %s is not previewable yet", mode.c_str() );
 			}
 			continue;
 		}
@@ -1004,6 +1199,21 @@ static bool parse_definition_into( char* source, const char* shaderName, const c
 				}
 				continue;
 			}
+			if ( keyword_equals( mode, "turb" ) ) {
+				std::string base, amplitude, phase, frequency;
+				if ( !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
+					shadershop_warn( "stage %d: incomplete tcMod turb", stageNumber );
+				}
+				else {
+					TcModOperation operation( TCMOD_TURB, directiveLine );
+					operation.values[0] = static_cast<float>( atof( base.c_str() ) );
+					operation.values[1] = static_cast<float>( atof( amplitude.c_str() ) );
+					operation.values[2] = static_cast<float>( atof( phase.c_str() ) );
+					operation.values[3] = static_cast<float>( atof( frequency.c_str() ) );
+					stage.tcModOperations.push_back( operation );
+				}
+				continue;
+			}
 			if ( !keyword_equals( mode, "stretch" ) ) continue;
 			std::string wave, base, amplitude, phase, frequency;
 			if ( !next_script_token_on_line( directiveLine, wave ) || !next_script_token_on_line( directiveLine, base ) || !next_script_token_on_line( directiveLine, amplitude ) || !next_script_token_on_line( directiveLine, phase ) || !next_script_token_on_line( directiveLine, frequency ) ) {
@@ -1123,13 +1333,37 @@ static void parse_selected_stages( const char* shaderName ){
 		return;
 	}
 
-	const bool complete = parse_definition_into( static_cast<char*>( buffer ), shaderName, shader->getShaderFileName(), g_stages, &g_editorImageName );
+	const bool complete = parse_definition_into( static_cast<char*>( buffer ), shaderName, shader->getShaderFileName(), g_stages, &g_editorImageName, &g_deformWaves, &g_deformMoves, &g_deformNormals, &g_deformBulges );
 	g_free( buffer );
 	// ScriptLib's cursor is process-global; do not leave it pointing into the
 	// buffer just released.
 	if ( g_ScripLibTable.m_pfnStartTokenParsing != NULL ) {
 		static char emptyScript[1] = { '\0' };
 		g_ScripLibTable.m_pfnStartTokenParsing( emptyScript );
+	}
+	for ( std::vector<PreviewDeformWave>::const_iterator deform = g_deformWaves.begin(); deform != g_deformWaves.end(); ++deform ) {
+		if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) {
+			g_animationActive = true;
+			break;
+		}
+	}
+	for ( std::vector<PreviewDeformMove>::const_iterator deform = g_deformMoves.begin(); deform != g_deformMoves.end(); ++deform ) {
+		if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) {
+			g_animationActive = true;
+			break;
+		}
+	}
+	for ( std::vector<PreviewDeformNormal>::const_iterator deform = g_deformNormals.begin(); deform != g_deformNormals.end(); ++deform ) {
+		if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) {
+			g_animationActive = true;
+			break;
+		}
+	}
+	for ( std::vector<PreviewDeformBulge>::const_iterator deform = g_deformBulges.begin(); deform != g_deformBulges.end(); ++deform ) {
+		if ( deform->height != 0.0f && deform->speed != 0.0f ) {
+			g_animationActive = true;
+			break;
+		}
 	}
 	load_stage_images( g_stages, true );
 	classify_destination_use();
@@ -1337,14 +1571,15 @@ void ShaderShop_RefreshSelection(){
 		snprintf( text, sizeof( text ), "Selected shader: %s", selected );
 		gtk_label_set_text( GTK_LABEL( g_pSelectionLabel ), text );
 
+		g_editorDirty = false;
 		parse_selected_stages( selected );
 
 		if ( g_animationTimer != 0 ) {
 			g_source_remove( g_animationTimer );
 			g_animationTimer = 0;
 		}
-		preview_clock_reset();
 		g_animationPaused = false;
+		preview_clock_reset();
 		start_animation_timer();
 
 		if ( g_animationButton != NULL ) {
@@ -1391,7 +1626,10 @@ void ShaderShop_RefreshSelection(){
 		if ( g_stageLabel != NULL ) {
 			gtk_label_set_text( GTK_LABEL( g_stageLabel ), "Parsed stages: 0" );
 		}
+		g_editorDirty = false;
 	}
+
+	rebuild_editor_stage_stack();
 
 	// g_previewFrameDrawn is a latch on "has a frame reached the screen since
 	// the last thing that could invalidate it", not "since the window opened".
@@ -1574,8 +1812,26 @@ static PreviewTexCoord evaluate_stage_texcoord( const PreviewStage& stage, float
 		}
 		case TCMOD_STRETCH: {
 			const float stretch = operation->values[0] + operation->values[1] * wave_value( operation->waveForm, operation->values[2] + elapsedSeconds * operation->values[3] );
-			s = 0.5f + ( s - 0.5f ) * stretch;
-			t = 0.5f + ( t - 0.5f ) * stretch;
+			// The shader's waveform is the visual scale.  Texture coordinates
+			// therefore use its reciprocal, as does the original renderer.
+			// Leave a degenerate authored value stable instead of dividing by zero.
+			if ( fabsf( stretch ) > 0.0001f ) {
+				const float reciprocal = 1.0f / stretch;
+				s = 0.5f + ( s - 0.5f ) * reciprocal;
+				t = 0.5f + ( t - 0.5f ) * reciprocal;
+			}
+			break;
+		}
+		case TCMOD_TURB: {
+			// tcMod turb offsets each coordinate from the other, producing the
+			// characteristic circulating churn rather than a uniform translation.
+			// The language leaves base undefined; retain it as a phase offset so
+			// authored nonzero values still produce a distinct, stable result.
+			const float sourceS = s;
+			const float sourceT = t;
+			const float timePhase = operation->values[0] + operation->values[2] + elapsedSeconds * operation->values[3];
+			s = sourceS + sinf( 6.28318530718f * ( sourceT + timePhase ) ) * operation->values[1];
+			t = sourceT + sinf( 6.28318530718f * ( sourceS + timePhase ) ) * operation->values[1];
 			break;
 		}
 		}
@@ -1597,6 +1853,114 @@ static void draw_stage_textured_quad( GLuint texture, const PreviewStage& stage,
 	g_QglTable.m_pfn_qglTexCoord2f( topRight.s, topRight.t ); g_QglTable.m_pfn_qglVertex2f( right, top );
 	g_QglTable.m_pfn_qglTexCoord2f( topLeft.s, topLeft.t ); g_QglTable.m_pfn_qglVertex2f( left, top );
 	g_QglTable.m_pfn_qglEnd();
+}
+
+// Keep this deliberately modest: it is dense enough for the first vertex
+// deformation and turbulence work, but remains inexpensive on legacy GL and
+// avoids requiring vertex buffers or programmable rendering.
+static const int PREVIEW_MESH_SUBDIVISIONS = 24;
+
+// Material space is normalised to a unit-long side while shader deformation
+// values are authored in Quake world units. This conversion gives ordinary
+// amplitudes (roughly 1--5 units) a visible but restrained inspection scale.
+static const float PREVIEW_DEFORM_WORLD_UNITS = 64.0f;
+
+static float preview_deform_height( float u, float v, float elapsedSeconds ){
+	float height = 0.0f;
+	for ( std::vector<PreviewDeformWave>::const_iterator deform = g_deformWaves.begin(); deform != g_deformWaves.end(); ++deform ) {
+		// Quake's wave deformation spreads the waveform over vertex position.
+		// The preview's u/v coordinates stand in for a 64-unit material side.
+		const float spatialPhase = ( u + v ) * PREVIEW_DEFORM_WORLD_UNITS / deform->spread;
+		const float wave = wave_value( deform->waveForm, deform->phase + elapsedSeconds * deform->frequency + spatialPhase );
+		height += ( deform->base + deform->amplitude * wave ) / PREVIEW_DEFORM_WORLD_UNITS;
+	}
+	for ( std::vector<PreviewDeformBulge>::const_iterator deform = g_deformBulges.begin(); deform != g_deformBulges.end(); ++deform ) {
+		// Quake's bulge travels along the surface S coordinate and pushes along
+		// its normal. The preview plane's initial normal is +Z.
+		height += sinf( 6.28318530718f * ( u * deform->width + elapsedSeconds * deform->speed ) ) * deform->height / PREVIEW_DEFORM_WORLD_UNITS;
+	}
+	return height;
+}
+
+static void preview_deform_move( float elapsedSeconds, float& x, float& y, float& z ){
+	for ( std::vector<PreviewDeformMove>::const_iterator deform = g_deformMoves.begin(); deform != g_deformMoves.end(); ++deform ) {
+		const float amount = deform->base + deform->amplitude * wave_value( deform->waveForm, deform->phase + elapsedSeconds * deform->frequency );
+		x += deform->direction[0] * amount / PREVIEW_DEFORM_WORLD_UNITS;
+		y += deform->direction[1] * amount / PREVIEW_DEFORM_WORLD_UNITS;
+		z += deform->direction[2] * amount / PREVIEW_DEFORM_WORLD_UNITS;
+	}
+}
+
+static float preview_normal_noise( float x, float y, float z, float time, float phase ){
+	// The game uses a smooth four-dimensional noise field. This compact,
+	// deterministic approximation supplies the same continuously moving normal
+	// perturbation without importing another renderer's noise implementation.
+	return sinf( x * 7.19f + y * 11.71f + z * 5.31f + time * 1.93f + phase ) *
+		   sinf( x * 3.67f - y * 8.23f + z * 9.17f + time * 1.21f + phase * 0.37f );
+}
+
+static void preview_deform_normal( float u, float v, float z, float elapsedSeconds, float& normalX, float& normalY, float& normalZ ){
+	for ( std::vector<PreviewDeformNormal>::const_iterator deform = g_deformNormals.begin(); deform != g_deformNormals.end(); ++deform ) {
+		const float time = elapsedSeconds * deform->frequency;
+		normalX += deform->amplitude * preview_normal_noise( u, v, z, time, 0.0f );
+		normalY += deform->amplitude * preview_normal_noise( u, v, z, time, 100.0f );
+		normalZ += deform->amplitude * preview_normal_noise( u, v, z, time, 200.0f );
+	}
+}
+
+static bool preview_has_geometry_deforms(){
+	return !g_deformWaves.empty() || !g_deformMoves.empty() || !g_deformNormals.empty() || !g_deformBulges.empty();
+}
+
+static void draw_stage_mesh_vertex( const PreviewStage& stage, float u, float v, float x, float y, float width, float height, float elapsedSeconds ){
+	const float normalStep = 1.0f / PREVIEW_MESH_SUBDIVISIONS;
+	float z = preview_deform_height( u, v, elapsedSeconds );
+	const float dzdu = ( preview_deform_height( u + normalStep, v, elapsedSeconds ) - preview_deform_height( u - normalStep, v, elapsedSeconds ) ) / ( 2.0f * normalStep );
+	const float dzdv = ( preview_deform_height( u, v + normalStep, elapsedSeconds ) - preview_deform_height( u, v - normalStep, elapsedSeconds ) ) / ( 2.0f * normalStep );
+	float normalX = -dzdu / width;
+	float normalY = -dzdv / height;
+	float normalZ = 1.0f;
+	preview_deform_normal( u, v, z, elapsedSeconds, normalX, normalY, normalZ );
+	const float normalLength = sqrtf( normalX * normalX + normalY * normalY + normalZ * normalZ );
+	if ( normalLength != 0.0f ) {
+		normalX /= normalLength;
+		normalY /= normalLength;
+		normalZ /= normalLength;
+	}
+
+	const PreviewTexCoord coordinate = evaluate_stage_texcoord( stage, u, 1.0f - v, elapsedSeconds );
+	preview_deform_move( elapsedSeconds, x, y, z );
+	g_QglTable.m_pfn_qglNormal3f( normalX, normalY, normalZ );
+	g_QglTable.m_pfn_qglTexCoord2f( coordinate.s, coordinate.t );
+	g_QglTable.m_pfn_qglVertex3f( x, y, z );
+}
+
+static void draw_stage_textured_mesh( GLuint texture, const PreviewStage& stage, float left, float bottom, float right, float top ){
+	const float elapsedSeconds = preview_time();
+	const float width = right - left;
+	const float height = top - bottom;
+	g_QglTable.m_pfn_qglBindTexture( GL_TEXTURE_2D, texture );
+	for ( int row = 0; row < PREVIEW_MESH_SUBDIVISIONS; ++row ) {
+		const float lowerV = static_cast<float>( row ) / PREVIEW_MESH_SUBDIVISIONS;
+		const float upperV = static_cast<float>( row + 1 ) / PREVIEW_MESH_SUBDIVISIONS;
+		g_QglTable.m_pfn_qglBegin( GL_QUAD_STRIP );
+		for ( int column = 0; column <= PREVIEW_MESH_SUBDIVISIONS; ++column ) {
+			const float u = static_cast<float>( column ) / PREVIEW_MESH_SUBDIVISIONS;
+			const float x = left + width * u;
+			draw_stage_mesh_vertex( stage, u, lowerV, x, bottom + height * lowerV, width, height, elapsedSeconds );
+			draw_stage_mesh_vertex( stage, u, upperV, x, bottom + height * upperV, width, height, elapsedSeconds );
+		}
+		g_QglTable.m_pfn_qglEnd();
+	}
+}
+
+static void draw_stage_textured_surface( GLuint texture, const PreviewStage& stage, float left, float bottom, float right, float top ){
+	if ( g_3dInspect || preview_has_geometry_deforms() || stage_requires_tessellated_preview( stage ) ) {
+		draw_stage_textured_mesh( texture, stage, left, bottom, right, top );
+	}
+	else {
+		draw_stage_textured_quad( texture, stage, left, bottom, right, top );
+	}
 }
 
 static void draw_preview(){
@@ -1645,6 +2009,13 @@ static void draw_preview(){
 	}
 
 	upload_texture( g_selectedTexture, g_selectedTextureUploaded, g_selectedPixels, g_selectedWidth, g_selectedHeight );
+
+	// The first usable GL frame is the visual zero of a newly selected material.
+	// In particular, a rapid tcMod rotate must not accrue time while its texture
+	// is still being decoded or uploaded.
+	if ( g_animationActive && !g_animationPaused && g_animationResumed == 0 ) {
+		preview_clock_resume();
+	}
 
 	g_QglTable.m_pfn_qglViewport( 0, 0, width, height );
 	g_QglTable.m_pfn_qglClearColor( 0.08f, 0.09f, 0.11f, 1.0f );
@@ -1798,7 +2169,7 @@ static void draw_preview(){
 			g_QglTable.m_pfn_qglEnable( GL_TEXTURE_GEN_S );
 			g_QglTable.m_pfn_qglEnable( GL_TEXTURE_GEN_T );
 		}
-		draw_stage_textured_quad( texture, *stage, left, bottom, right, top );
+		draw_stage_textured_surface( texture, *stage, left, bottom, right, top );
 		if ( stage->environmentTexGen ) {
 			g_QglTable.m_pfn_qglDisable( GL_TEXTURE_GEN_S );
 			g_QglTable.m_pfn_qglDisable( GL_TEXTURE_GEN_T );
@@ -1962,14 +2333,414 @@ static void preview_destroyed( GtkWidget*, gpointer ){
 	g_pPreviewWindow = NULL;
 }
 
-static void edit_shader_clicked( GtkButton*, gpointer ){
-	g_FuncTable.m_pfnMessageBox(
-		g_pPreviewWindow,
-		"Shader editing is not implemented yet; this build currently provides the preview surface.",
-		"ShaderShop",
-		MB_OK,
-		NULL
+// =============================================================================
+// DRAFT STAGE EDITOR
+//
+// This deliberately edits the parsed preview representation only.  It gives
+// authors an immediate, ordered compositing workbench without claiming that a
+// lossy reconstruction is safe to write back to a .shader file.  Save arrives
+// with the lossless ShaderDocument layer.
+
+static void editor_set_status(){
+	if ( g_editorStatusLabel == NULL ) return;
+	char status[256];
+	snprintf(
+		status, sizeof( status ),
+		"%d stage%s — %s draft; preview updates immediately, source files are untouched",
+		static_cast<int>( g_stages.size() ), g_stages.size() == 1 ? "" : "s",
+		g_editorDirty ? "modified" : "read-only"
 	);
+	gtk_label_set_text( GTK_LABEL( g_editorStatusLabel ), status );
+}
+
+static int editor_stage_index( GtkWidget* widget ){
+	return GPOINTER_TO_INT( g_object_get_data( G_OBJECT( widget ), "shadershop-stage-index" ) );
+}
+
+static void editor_mark_dirty(){
+	g_editorDirty = true;
+	editor_set_status();
+	queue_preview_render();
+}
+
+static GtkWidget* editor_blend_combo( const std::string& selected ){
+	static const char* factors[] = {
+		"GL_ZERO", "GL_ONE", "GL_SRC_COLOR", "GL_ONE_MINUS_SRC_COLOR",
+		"GL_DST_COLOR", "GL_ONE_MINUS_DST_COLOR", "GL_SRC_ALPHA",
+		"GL_ONE_MINUS_SRC_ALPHA", "GL_DST_ALPHA", "GL_ONE_MINUS_DST_ALPHA"
+	};
+	GtkWidget* combo = gtk_combo_box_text_new();
+	int active = 0;
+	for ( size_t i = 0; i < sizeof( factors ) / sizeof( factors[0] ); ++i ) {
+		gtk_combo_box_text_append_text( GTK_COMBO_BOX_TEXT( combo ), factors[i] );
+		if ( !strcasecmp( factors[i], selected.c_str() ) ) active = static_cast<int>( i );
+	}
+	gtk_combo_box_set_active( GTK_COMBO_BOX( combo ), active );
+	return combo;
+}
+
+static const char* editor_blend_description( const PreviewStage& stage ){
+	const GLenum source = blend_factor( stage.blendSrc );
+	const GLenum destination = blend_factor( stage.blendDst );
+	if ( source == GL_ONE && destination == GL_ZERO ) return "Compositing: Replace — this stage is the new destination";
+	if ( source == GL_SRC_ALPHA && destination == GL_ONE_MINUS_SRC_ALPHA ) return "Compositing: Alpha blend — source alpha over the destination";
+	if ( source == GL_ONE && destination == GL_ONE ) return "Compositing: Add — brightens by adding source and destination";
+	if ( source == GL_SRC_ALPHA && destination == GL_ONE ) return "Compositing: Alpha add — adds the source through its alpha";
+	if ( source == GL_DST_COLOR && destination == GL_ZERO ) return "Compositing: Multiply — source darkens or tints the destination";
+	if ( ( source == GL_ONE && destination == GL_ONE_MINUS_SRC_COLOR ) ||
+		 ( source == GL_ONE_MINUS_DST_COLOR && destination == GL_ONE ) ) return "Compositing: Screen — brightens while preserving highlights";
+	if ( source == GL_ZERO && destination == GL_ONE_MINUS_SRC_COLOR ) return "Compositing: Inverse multiply — source darkens the destination by inverse color";
+	if ( source == GL_ZERO && destination == GL_ONE ) return "Compositing: Destination only — this stage does not contribute visible color";
+	return "Compositing: Custom OpenGL factors — inspect the source/destination pair";
+}
+
+static void editor_blend_changed( GtkComboBox* combo, gpointer destination ){
+	if ( g_editorRebuilding ) return;
+	const int index = editor_stage_index( GTK_WIDGET( combo ) );
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
+	gchar* value = gtk_combo_box_text_get_active_text( GTK_COMBO_BOX_TEXT( combo ) );
+	if ( value == NULL ) return;
+	if ( GPOINTER_TO_INT( destination ) == 0 ) g_stages[index].blendSrc = value;
+	else g_stages[index].blendDst = value;
+	g_free( value );
+	GtkWidget* summary = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( combo ), "shadershop-blend-summary" ) );
+	if ( summary != NULL ) gtk_label_set_text( GTK_LABEL( summary ), editor_blend_description( g_stages[index] ) );
+	classify_destination_use();
+	editor_mark_dirty();
+}
+
+static void editor_image_apply_clicked( GtkButton* button, gpointer ){
+	const int index = editor_stage_index( GTK_WIDGET( button ) );
+	GtkWidget* entry = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( button ), "shadershop-image-entry" ) );
+	if ( entry == NULL || index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
+	const char* name = gtk_entry_get_text( GTK_ENTRY( entry ) );
+	PreviewStage& stage = g_stages[index];
+	clear_stage_images( stage );
+	stage.animationNames.clear();
+	stage.animationFps = 0.0f;
+	stage.mapName = name == NULL ? "" : name;
+	if ( !stage.mapName.empty() && !load_image( stage.mapName.c_str(), &stage.pixels, &stage.width, &stage.height ) ) {
+		shadershop_warn( "stage %d: image '%s' could not be loaded", index + 1, stage.mapName.c_str() );
+	}
+	editor_mark_dirty();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_animation_rate_changed( GtkSpinButton* spin, gpointer ){
+	if ( g_editorRebuilding ) return;
+	const int index = editor_stage_index( GTK_WIDGET( spin ) );
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
+	g_stages[index].animationFps = static_cast<float>( gtk_spin_button_get_value( spin ) );
+	editor_mark_dirty();
+}
+
+static void editor_stage_remove_clicked( GtkButton* button, gpointer ){
+	const int index = editor_stage_index( GTK_WIDGET( button ) );
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
+	clear_stage_images( g_stages[index] );
+	g_stages.erase( g_stages.begin() + index );
+	classify_destination_use();
+	editor_mark_dirty();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_stage_add_clicked( GtkButton*, gpointer ){
+	g_stages.push_back( PreviewStage() );
+	classify_destination_use();
+	editor_mark_dirty();
+	rebuild_editor_stage_stack();
+}
+
+static GtkTargetEntry g_editorStageDragTargets[] = {
+	{ const_cast<gchar*>( "application/x-shadershop-stage" ), GTK_TARGET_SAME_APP, 0 }
+};
+
+static void editor_clear_drop_marker(){
+	if ( g_editorDropMarker != NULL ) gtk_widget_hide( g_editorDropMarker );
+	g_editorDropMarker = NULL;
+	g_editorDropIndex = -1;
+	g_editorDropAfter = false;
+}
+
+static void editor_show_drop_marker( GtkWidget* slot, int index, bool after ){
+	if ( g_editorDropMarker != NULL && g_editorDropIndex == index && g_editorDropAfter == after ) return;
+	if ( g_editorDropMarker != NULL ) gtk_widget_hide( g_editorDropMarker );
+	g_editorDropMarker = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( slot ), after ? "shadershop-drop-after" : "shadershop-drop-before" ) );
+	g_editorDropIndex = index;
+	g_editorDropAfter = after;
+	if ( g_editorDropMarker != NULL ) gtk_widget_show( g_editorDropMarker );
+}
+
+static void editor_stage_drag_begin( GtkWidget* grip, GdkDragContext*, gpointer ){
+	g_editorDragIndex = editor_stage_index( grip );
+	editor_clear_drop_marker();
+}
+
+static void editor_stage_drag_end( GtkWidget*, GdkDragContext*, gpointer ){
+	g_editorDragIndex = -1;
+	editor_clear_drop_marker();
+}
+
+static void editor_stage_drag_data_get( GtkWidget* grip, GdkDragContext*, GtkSelectionData* selection, guint, guint, gpointer ){
+	const int index = editor_stage_index( grip );
+	const GdkAtom target = gdk_atom_intern( "application/x-shadershop-stage", FALSE );
+	gtk_selection_data_set( selection, target, 8, reinterpret_cast<const guchar*>( &index ), sizeof( index ) );
+}
+
+static gboolean editor_stage_drag_motion( GtkWidget* slot, GdkDragContext* context, gint, gint y, guint time, gpointer ){
+	GtkAllocation allocation;
+	gtk_widget_get_allocation( slot, &allocation );
+	editor_show_drop_marker( slot, editor_stage_index( slot ), y >= allocation.height / 2 );
+	gdk_drag_status( context, GDK_ACTION_MOVE, time );
+	return TRUE;
+}
+
+static void editor_stage_drag_leave( GtkWidget*, GdkDragContext*, guint, gpointer ){
+	editor_clear_drop_marker();
+}
+
+static gboolean editor_stage_drag_drop( GtkWidget* slot, GdkDragContext* context, gint, gint y, guint time, gpointer ){
+	GtkAllocation allocation;
+	gtk_widget_get_allocation( slot, &allocation );
+	editor_show_drop_marker( slot, editor_stage_index( slot ), y >= allocation.height / 2 );
+	const GdkAtom target = gtk_drag_dest_find_target( slot, context, NULL );
+	if ( target == GDK_NONE ) return FALSE;
+	gtk_drag_get_data( slot, context, target, time );
+	return TRUE;
+}
+
+static void editor_stage_drag_data_received( GtkWidget* slot, GdkDragContext* context, gint, gint, GtkSelectionData* selection, guint, guint time, gpointer ){
+	int source = g_editorDragIndex;
+	if ( gtk_selection_data_get_length( selection ) == static_cast<gint>( sizeof( source ) ) ) {
+		memcpy( &source, gtk_selection_data_get_data( selection ), sizeof( source ) );
+	}
+	const int target = g_editorDropIndex >= 0 ? g_editorDropIndex : editor_stage_index( slot );
+	int destination = target + ( g_editorDropAfter ? 1 : 0 );
+	bool moved = false;
+	if ( source >= 0 && source < static_cast<int>( g_stages.size() ) && destination >= 0 && destination <= static_cast<int>( g_stages.size() ) ) {
+		if ( source < destination ) --destination;
+		if ( destination != source ) {
+			PreviewStage movedStage = g_stages[source];
+			g_stages.erase( g_stages.begin() + source );
+			g_stages.insert( g_stages.begin() + destination, movedStage );
+			classify_destination_use();
+			editor_mark_dirty();
+			moved = true;
+		}
+	}
+	gtk_drag_finish( context, moved, FALSE, time );
+	editor_clear_drop_marker();
+	if ( moved ) rebuild_editor_stage_stack();
+}
+
+static void editor_destroyed( GtkWidget*, gpointer ){
+	g_pEditorWindow = NULL;
+	g_editorStageStack = NULL;
+	g_editorStatusLabel = NULL;
+	editor_clear_drop_marker();
+	g_editorDragIndex = -1;
+}
+
+static void editor_pack_row( GtkWidget* box, GtkWidget* child ){
+	gtk_box_pack_start( GTK_BOX( box ), child, FALSE, FALSE, 0 );
+	gtk_widget_show( child );
+}
+
+static void editor_append_stage( int index ){
+	const PreviewStage& stage = g_stages[index];
+	char title[128];
+	snprintf( title, sizeof( title ), "Stage contents%s", stage_is_drawn( stage ) ? "" : " — no drawable image" );
+	GtkWidget* slot = gtk_event_box_new();
+	g_object_set_data( G_OBJECT( slot ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	gtk_drag_dest_set( slot, GTK_DEST_DEFAULT_ALL, g_editorStageDragTargets, 1, GDK_ACTION_MOVE );
+	g_signal_connect( G_OBJECT( slot ), "drag-motion", G_CALLBACK( editor_stage_drag_motion ), NULL );
+	g_signal_connect( G_OBJECT( slot ), "drag-leave", G_CALLBACK( editor_stage_drag_leave ), NULL );
+	g_signal_connect( G_OBJECT( slot ), "drag-drop", G_CALLBACK( editor_stage_drag_drop ), NULL );
+	g_signal_connect( G_OBJECT( slot ), "drag-data-received", G_CALLBACK( editor_stage_drag_data_received ), NULL );
+	gtk_box_pack_start( GTK_BOX( g_editorStageStack ), slot, FALSE, FALSE, 0 );
+	gtk_widget_show( slot );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	GtkWidget* slotRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	GtkWidget* contentColumn = gtk_box_new( GTK_ORIENTATION_VERTICAL, 2 );
+	GtkWidget* contentRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* body = gtk_box_new( GTK_ORIENTATION_VERTICAL, 4 );
+	GtkWidget* imageRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* blendRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* animationRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* orderRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+#else
+	GtkWidget* slotRow = gtk_hbox_new( FALSE, 0 );
+	GtkWidget* contentColumn = gtk_vbox_new( FALSE, 2 );
+	GtkWidget* contentRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* body = gtk_vbox_new( FALSE, 4 );
+	GtkWidget* imageRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* blendRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* animationRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* orderRow = gtk_hbox_new( FALSE, 4 );
+#endif
+	gtk_container_add( GTK_CONTAINER( slot ), slotRow );
+	gtk_widget_show( slotRow );
+	GtkWidget* stageChrome = gtk_event_box_new();
+	GdkColor darkChrome;
+	darkChrome.red = 0x2020; darkChrome.green = 0x2424; darkChrome.blue = 0x2b2b;
+	gtk_widget_modify_bg( stageChrome, GTK_STATE_NORMAL, &darkChrome );
+	char number[16];
+	snprintf( number, sizeof( number ), "%d", index + 1 );
+	GtkWidget* numberLabel = gtk_label_new( number );
+	GdkColor lightText;
+	lightText.red = 0xd8d8; lightText.green = 0xd8d8; lightText.blue = 0xd8d8;
+	gtk_widget_modify_fg( numberLabel, GTK_STATE_NORMAL, &lightText );
+	gtk_widget_set_size_request( stageChrome, 36, -1 );
+	gtk_container_add( GTK_CONTAINER( stageChrome ), numberLabel );
+	gtk_box_pack_start( GTK_BOX( slotRow ), stageChrome, FALSE, FALSE, 0 );
+	gtk_widget_show( numberLabel );
+	gtk_widget_show( stageChrome );
+	gtk_box_pack_start( GTK_BOX( slotRow ), contentColumn, TRUE, TRUE, 5 );
+	gtk_widget_show( contentColumn );
+	GtkWidget* beforeMarker = gtk_label_new( "Drop stage here" );
+	gtk_widget_set_no_show_all( beforeMarker, TRUE );
+	gtk_box_pack_start( GTK_BOX( contentColumn ), beforeMarker, FALSE, FALSE, 0 );
+	g_object_set_data( G_OBJECT( slot ), "shadershop-drop-before", beforeMarker );
+	gtk_box_pack_start( GTK_BOX( contentColumn ), contentRow, FALSE, FALSE, 0 );
+	gtk_widget_show( contentRow );
+	GtkWidget* grip = gtk_event_box_new();
+	GtkWidget* gripLabel = gtk_label_new( "⋮\n⋮\n⋮" );
+	gtk_container_add( GTK_CONTAINER( grip ), gripLabel );
+	gtk_widget_set_tooltip_text( grip, "Drag this stage to the highlighted insertion point" );
+	gtk_widget_set_size_request( grip, 24, -1 );
+	g_object_set_data( G_OBJECT( grip ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	gtk_drag_source_set( grip, GDK_BUTTON1_MASK, g_editorStageDragTargets, 1, GDK_ACTION_MOVE );
+	g_signal_connect( G_OBJECT( grip ), "drag-begin", G_CALLBACK( editor_stage_drag_begin ), NULL );
+	g_signal_connect( G_OBJECT( grip ), "drag-end", G_CALLBACK( editor_stage_drag_end ), NULL );
+	g_signal_connect( G_OBJECT( grip ), "drag-data-get", G_CALLBACK( editor_stage_drag_data_get ), NULL );
+	gtk_box_pack_start( GTK_BOX( contentRow ), grip, FALSE, FALSE, 0 );
+	gtk_widget_show( gripLabel );
+	gtk_widget_show( grip );
+	GtkWidget* frame = gtk_frame_new( title );
+	gtk_frame_set_shadow_type( GTK_FRAME( frame ), GTK_SHADOW_ETCHED_IN );
+	gtk_box_pack_start( GTK_BOX( contentRow ), frame, TRUE, TRUE, 0 );
+	gtk_widget_show( frame );
+	gtk_container_set_border_width( GTK_CONTAINER( body ), 5 );
+	gtk_container_add( GTK_CONTAINER( frame ), body );
+	gtk_widget_show( body );
+	editor_pack_row( body, imageRow );
+	editor_pack_row( body, blendRow );
+
+	GtkWidget* imageLabel = gtk_label_new( "Image (VFS path):" );
+	editor_pack_row( imageRow, imageLabel );
+	GtkWidget* imageEntry = gtk_entry_new();
+	gtk_entry_set_text( GTK_ENTRY( imageEntry ), stage.mapName.c_str() );
+	gtk_widget_set_tooltip_text( imageEntry, "Use game-relative names such as textures/myset/image.tga; this does not write a file." );
+	gtk_box_pack_start( GTK_BOX( imageRow ), imageEntry, TRUE, TRUE, 0 );
+	gtk_widget_show( imageEntry );
+	GtkWidget* load = gtk_button_new_with_label( "Load" );
+	g_object_set_data( G_OBJECT( load ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_object_set_data( G_OBJECT( load ), "shadershop-image-entry", imageEntry );
+	g_signal_connect( G_OBJECT( load ), "clicked", G_CALLBACK( editor_image_apply_clicked ), NULL );
+	editor_pack_row( imageRow, load );
+
+	editor_pack_row( blendRow, gtk_label_new( "Blend:" ) );
+	GtkWidget* source = editor_blend_combo( stage.blendSrc );
+	g_object_set_data( G_OBJECT( source ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( source ), "changed", G_CALLBACK( editor_blend_changed ), NULL );
+	editor_pack_row( blendRow, source );
+	editor_pack_row( blendRow, gtk_label_new( "→" ) );
+	GtkWidget* destination = editor_blend_combo( stage.blendDst );
+	g_object_set_data( G_OBJECT( destination ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( destination ), "changed", G_CALLBACK( editor_blend_changed ), GINT_TO_POINTER( 1 ) );
+	editor_pack_row( blendRow, destination );
+	GtkWidget* blendSummary = gtk_label_new( editor_blend_description( stage ) );
+	gtk_label_set_line_wrap( GTK_LABEL( blendSummary ), TRUE );
+	gtk_misc_set_alignment( GTK_MISC( blendSummary ), 0.0f, 0.5f );
+	g_object_set_data( G_OBJECT( source ), "shadershop-blend-summary", blendSummary );
+	g_object_set_data( G_OBJECT( destination ), "shadershop-blend-summary", blendSummary );
+	editor_pack_row( body, blendSummary );
+	editor_pack_row( body, animationRow );
+	editor_pack_row( body, orderRow );
+
+	char animationText[128];
+	if ( stage.animationNames.size() > 1 ) snprintf( animationText, sizeof( animationText ), "Animation: %d frames at", static_cast<int>( stage.animationNames.size() ) );
+	else snprintf( animationText, sizeof( animationText ), "Animation: static image" );
+	editor_pack_row( animationRow, gtk_label_new( animationText ) );
+	GtkWidget* rate = gtk_spin_button_new_with_range( 0.0, 60.0, 0.1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( rate ), stage.animationFps );
+	gtk_widget_set_sensitive( rate, stage.animationNames.size() > 1 );
+	gtk_widget_set_tooltip_text( rate, "animMap frames per second. Frame-list editing will be added with the source document." );
+	g_object_set_data( G_OBJECT( rate ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( rate ), "value-changed", G_CALLBACK( editor_animation_rate_changed ), NULL );
+	editor_pack_row( animationRow, rate );
+	editor_pack_row( animationRow, gtk_label_new( "fps" ) );
+
+	editor_pack_row( orderRow, gtk_label_new( "Reorder using the grip at left." ) );
+	GtkWidget* remove = gtk_button_new_with_label( "Remove Stage" );
+	g_object_set_data( G_OBJECT( remove ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( remove ), "clicked", G_CALLBACK( editor_stage_remove_clicked ), NULL );
+	editor_pack_row( orderRow, remove );
+	GtkWidget* afterMarker = gtk_label_new( "Drop stage here" );
+	gtk_widget_set_no_show_all( afterMarker, TRUE );
+	gtk_box_pack_start( GTK_BOX( contentColumn ), afterMarker, FALSE, FALSE, 0 );
+	g_object_set_data( G_OBJECT( slot ), "shadershop-drop-after", afterMarker );
+}
+
+static void rebuild_editor_stage_stack(){
+	if ( g_editorStageStack == NULL ) return;
+	g_editorRebuilding = true;
+	GList* children = gtk_container_get_children( GTK_CONTAINER( g_editorStageStack ) );
+	for ( GList* child = children; child != NULL; child = child->next ) gtk_widget_destroy( GTK_WIDGET( child->data ) );
+	g_list_free( children );
+	for ( int index = 0; index < static_cast<int>( g_stages.size() ); ++index ) editor_append_stage( index );
+	GtkWidget* add = gtk_button_new_with_label( "Add Stage" );
+	g_signal_connect( G_OBJECT( add ), "clicked", G_CALLBACK( editor_stage_add_clicked ), NULL );
+	gtk_box_pack_start( GTK_BOX( g_editorStageStack ), add, FALSE, FALSE, 4 );
+	gtk_widget_show( add );
+	g_editorRebuilding = false;
+	editor_set_status();
+}
+
+static void edit_shader_clicked( GtkButton*, gpointer ){
+	if ( g_pEditorWindow != NULL ) {
+		rebuild_editor_stage_stack();
+		gtk_window_present( GTK_WINDOW( g_pEditorWindow ) );
+		return;
+	}
+	g_pEditorWindow = gtk_window_new( GTK_WINDOW_TOPLEVEL );
+	gtk_window_set_title( GTK_WINDOW( g_pEditorWindow ), "ShaderShop — Stage Editor" );
+	gtk_window_set_default_size( GTK_WINDOW( g_pEditorWindow ), 560, 560 );
+	if ( g_pPreviewWindow != NULL ) gtk_window_set_transient_for( GTK_WINDOW( g_pEditorWindow ), GTK_WINDOW( g_pPreviewWindow ) );
+	g_signal_connect( G_OBJECT( g_pEditorWindow ), "destroy", G_CALLBACK( editor_destroyed ), NULL );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	GtkWidget* box = gtk_box_new( GTK_ORIENTATION_VERTICAL, 6 );
+#else
+	GtkWidget* box = gtk_vbox_new( FALSE, 6 );
+#endif
+	gtk_container_set_border_width( GTK_CONTAINER( box ), 6 );
+	gtk_container_add( GTK_CONTAINER( g_pEditorWindow ), box );
+	gtk_widget_show( box );
+	GtkWidget* heading = gtk_label_new( "Ordered shader stages — the dark number gutter is a fixed position. Drag a stage by its grip to the highlighted insertion point." );
+	gtk_label_set_line_wrap( GTK_LABEL( heading ), TRUE );
+	gtk_misc_set_alignment( GTK_MISC( heading ), 0.0f, 0.5f );
+	gtk_box_pack_start( GTK_BOX( box ), heading, FALSE, FALSE, 0 );
+	gtk_widget_show( heading );
+	GtkWidget* scroll = gtk_scrolled_window_new( NULL, NULL );
+	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( scroll ), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
+	gtk_box_pack_start( GTK_BOX( box ), scroll, TRUE, TRUE, 0 );
+	gtk_widget_show( scroll );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	g_editorStageStack = gtk_box_new( GTK_ORIENTATION_VERTICAL, 6 );
+#else
+	g_editorStageStack = gtk_vbox_new( FALSE, 6 );
+#endif
+	gtk_container_set_border_width( GTK_CONTAINER( g_editorStageStack ), 4 );
+	gtk_scrolled_window_add_with_viewport( GTK_SCROLLED_WINDOW( scroll ), g_editorStageStack );
+	gtk_widget_show( g_editorStageStack );
+	g_editorStatusLabel = gtk_label_new( "" );
+	gtk_label_set_line_wrap( GTK_LABEL( g_editorStatusLabel ), TRUE );
+	gtk_misc_set_alignment( GTK_MISC( g_editorStatusLabel ), 0.0f, 0.5f );
+	gtk_box_pack_start( GTK_BOX( box ), g_editorStatusLabel, FALSE, FALSE, 0 );
+	gtk_widget_show( g_editorStatusLabel );
+	rebuild_editor_stage_stack();
+	gtk_widget_show( g_pEditorWindow );
+	gtk_window_present( GTK_WINDOW( g_pEditorWindow ) );
 }
 
 static gboolean refresh_selection_idle( gpointer ){
@@ -2082,7 +2853,7 @@ static bool load_backdrop_shader( const char* vfsName ){
 	bool ok = false;
 	if ( choose_definition( names, chosen ) ) {
 		clear_backdrop();
-		parse_definition_into( static_cast<char*>( buffer ), chosen.c_str(), vfsName, g_backdropStages, NULL );
+		parse_definition_into( static_cast<char*>( buffer ), chosen.c_str(), vfsName, g_backdropStages, NULL, NULL, NULL, NULL, NULL );
 		load_stage_images( g_backdropStages, false );
 		ok = !g_backdropStages.empty();
 		if ( ok ) {
@@ -2127,7 +2898,7 @@ static bool load_backdrop_from_active_shader( const char* shaderName ){
 	}
 
 	clear_backdrop();
-	parse_definition_into( static_cast<char*>( buffer ), shaderName, shader->getShaderFileName(), g_backdropStages, NULL );
+	parse_definition_into( static_cast<char*>( buffer ), shaderName, shader->getShaderFileName(), g_backdropStages, NULL, NULL, NULL, NULL, NULL );
 	load_stage_images( g_backdropStages, false );
 	const bool ok = !g_backdropStages.empty();
 	if ( ok ) {
