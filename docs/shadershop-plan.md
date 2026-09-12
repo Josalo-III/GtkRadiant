@@ -19,6 +19,27 @@ is showing**. The first is covered by the authority hierarchy below. The second
 is covered by the compositing-isolation rules, which are new in this revision
 and currently the module's largest source of visibly wrong output.
 
+## Current closeout status
+
+The core preview and draft-authoring scope is complete. ShaderShop now has a
+ScriptLib-backed selected-stage model; ordered compositing, animation, blend
+shorthands and factors, alpha tests, waveform and ordered `tcMod` evaluation;
+a tessellated 3D inspection surface with `turb` and the supported preview
+deforms; and an ordered draft editor that can save a newly authored loose
+`.shader` file. GTK 2 layout calls are guarded alongside the GTK 3 path.
+
+What is deliberately **not** complete is an editor for an existing source
+definition. The current editor works on a preview draft and must not claim a
+lossless round trip: it cannot yet preserve all whitespace, comments, unknown
+directives, and original spelling while changing an installed shader. That is
+the one remaining major milestone, not a small follow-up to the current UI.
+
+Closeout consists of keeping the ScriptLib-stage-walk fixture and corpus census
+green, performing the native platform smoke test, and updating this document
+when an observed shader requires more fidelity. `$lightmap` remains an explicit
+bare-material approximation controlled by the visible lightmap level; full map
+context remains deferred.
+
 The target language is the original Quake III shader language, but ShaderShop
 does not define that language for itself. **Radiant's own parser and shader
 consumers are the executable specification for this module.** ShaderShop should
@@ -1209,31 +1230,19 @@ advance, pause, and resume deterministically. Two animated stages with different
 frequencies remain independent. Re-measuring the corpus shows no `blendFunc`
 directive resolving to an unintended factor.
 
-**Status:** substantial progress, with one class of defect now blocking further
-feature work.
+**Status:** met for the declared bare-material scope. The renderer has ordered
+stage compositing and stage-owned elapsed-time animation; case-insensitive
+blend parsing with `add` / `filter` / `blend` shorthand and the full factor
+table; unblended `GL_ONE`/`GL_ZERO` defaults; clamp-to-edge; `alphaFunc`;
+all five waveform types; `rgbGen wave`; and ordered `tcMod` scroll, scale,
+rotate, transform, stretch, and turb evaluation. The checkerboard is no longer
+an arithmetic input, and the centred geometry supports meaningful orbit and
+reflection inspection.
 
-Working: ordered stage compositing and stage-owned animation; blend-factor case
-folding; `add` / `filter` / `blend` shorthand; the `SRC_COLOR` family in the
-factor table; the corrected `GL_ONE`/`GL_ZERO` default for a stage with no
-`blendFunc`; `clampmap` mapped to clamp-to-edge so jumppad rings do not tile;
-`alphaFunc`; `rgbGen wave`; `tcMod scroll`, `scale`, `rotate`, `transform`, and
-`stretch`; and the extensionless VFS retry that lets a mod ship a format other
-than the one the shader names.
-
-**Fixed since:** the checkerboard is no longer an operand. It is now used only
-where it provably cannot affect the result, and a defined uniform backdrop is
-substituted elsewhere, with the choice reported. Preview geometry is centred, so
-orbit and reflection generators act on the material.
-
-**Still blocking:** `$lightmap` fabricates white for 35.7% of corpus
-definitions. Until that stops asserting a fully lit surface, brightness
-comparisons against in-game appearance remain unreliable for roughly a third of
-the corpus.
-
-Also outstanding: `square` waveforms are accepted but evaluated as sine (see the
-fault-tolerance policy); `tcMod` operations are applied in a fixed internal
-order rather than source order; and preview time is still derived from a shared
-tick counter rather than elapsed time.
+`$lightmap` is intentionally represented by a visible, user-controlled neutral
+light level in this context-free preview. It is not a claim of per-surface BSP
+lighting. Full in-game brightness comparison therefore remains explicitly out
+of scope rather than a blocker for the material preview.
 
 ### 4. Stage stack and editing entry point
 
@@ -1251,6 +1260,12 @@ source-backed document.
 
 **Acceptance:** moving two editable stages changes the preview order while
 preserving unrecognized source material.
+
+**Status:** implemented for preview drafts. The stage stack is visible and
+editable, supports adding, removing, drag reordering, image selection, blend
+controls, animation frames, and ordered supported operations. Unsupported
+material remains reported by the preview; preserving it through an existing
+source-file edit belongs to milestone 5.
 
 ### 5. Lossless shader document and editor
 
@@ -1332,6 +1347,12 @@ understand the whole language.
 **Acceptance:** create or edit a shader, save it to a loose shader file, reload
 it in Radiant, assign it to geometry, and reopen it without losing comments or
 unrecognized source text.
+
+**Status:** partially delivered by the new-shader path only. ShaderShop can
+author and explicitly save a loose `.shader` draft, with overwrite confirmation.
+It does not yet edit an existing definition losslessly. Do not represent the
+current structured editor as satisfying the byte-identical round-trip
+invariants above.
 
 ## Resource lifecycle work
 
@@ -1544,16 +1565,20 @@ picture.
 6. ~~**Make preview time elapsed-time based.**~~ Done. Time is monotonic
    elapsed seconds, paused and resumed with the transport; the timer only asks
    for repaints.
-7. **Give `tcMod` a real ordered list and shared evaluator** rather than
-   independent flags applied in a fixed renderer sequence.
-8. **Make 3D inspection a tessellated material surface** and support
-   `deformVertexes wave`; retain the 2D swatch as the compositing reference.
-9. **Add `tcMod turb`** to that evaluator, with `runninglava` inspected at an
-   oblique angle as the first acceptance case.
-10. Generate `$whiteimage` once the Radiant/build consumer confirms the
-   documented behaviour.
-11. Restore the GTK 2 build by guarding GTK 3-only layout calls.
-12. Move native verification fully up to the ScriptLib-backed stage interpreter.
+7. ~~**Give `tcMod` a real ordered list and shared evaluator.**~~ Done. The
+   source-order operation list drives both the 2D swatch and mesh path.
+8. ~~**Make 3D inspection a tessellated material surface.**~~ Done. The mesh
+   supports the previewable wave, move, normal, and bulge deforms while the 2D
+   swatch remains the composition reference.
+9. ~~**Add `tcMod turb`.**~~ Done, evaluated per mesh vertex as well as in the
+   2D coordinate evaluator.
+10. `$whiteimage` and fuller special-map behaviour remain candidates only when
+    an observed shader needs them; `$lightmap` keeps its visible approximation.
+11. ~~**Restore the GTK 2 build guards.**~~ Done in the source. Native GTK 2
+    compilation remains a release-platform check.
+12. ~~**Replace the historical blend-failure census.**~~ Done. The harness now
+    walks ScriptLib through the same table contract, has a semantic fixture,
+    and reports current parser/interpreter coverage rather than obsolete errors.
 
 ### Implementation order: transform-capable preview
 
@@ -1571,19 +1596,21 @@ depend on shaders, framebuffer objects, or a platform-specific GL context.
    texture matrix or independent stage fields. Acceptance still needs native
    visual confirmation with deliberately reversed directive pairs: swapping
    `scroll` and `rotate` must change the result in script order.
-3. **Introduce a reusable tessellated material mesh for 3D inspection.** Keep
+3. ~~**Introduce a reusable tessellated material mesh for 3D inspection.**~~
+   Done. Keep
    the 2D view as the low-cost reference view, but draw an evenly subdivided
    grid in inspection mode using the same fixed-function, cross-platform GL
    calls as the existing quad. Evaluate UVs at its vertices and preserve orbit,
    pan, zoom, aspect ratio, stage order, alpha testing, and blend state.
    Acceptance: an affine multi-stage shader looks equivalent in 2D and in a
    front-on 3D view, while an oblique orbit makes the mesh geometry evident.
-4. **Parse and render `deformVertexes wave`.** Evaluate the existing waveform
+4. ~~**Parse and render `deformVertexes wave`.**~~ Done, with the related
+   previewable move, normal, and bulge forms. Evaluate the existing waveform
    functions against each grid vertex, recompute a usable normal from nearby
    displaced vertices, and leave unsupported deform forms visibly reported.
    Acceptance: a wave-deformed fixture changes silhouette and lighting/texgen
    response as it animates under orbit; it is not merely a projected UV change.
-5. **Add `tcMod turb`.** Implement Quake III's time-dependent turbulent UV
+5. ~~**Add `tcMod turb`.**~~ Done. Implement Quake III's time-dependent turbulent UV
    displacement in the shared evaluator; it is evaluated per mesh vertex, not
    approximated by a texture matrix. Acceptance: `textures/outrage/runninglava`
    ripples and scrolls continuously at an oblique orbit while retaining its
@@ -1593,11 +1620,12 @@ depend on shaders, framebuffer objects, or a platform-specific GL context.
    mapping. Each gets a named corpus shader and acceptance observation before it
    is implemented; unsupported directives stay explicit rather than silently
    approximated.
-7. **Begin the editor foundation once this representation is stable.** Build an
-   in-memory `ShaderDocument` from the selected VFS source, preserve a lossless
-   editable copy, and make save an explicit loose-file Save As/replace action.
-   That editor model must consume the same ordered stage representation, never
-   mutate a packaged or VFS source in place.
+7. **Keep the full editor foundation deferred.** Build an in-memory
+   `ShaderDocument` from the selected VFS source, preserve a lossless editable
+   copy, and make save an explicit loose-file Save As/replace action. That
+   editor model must consume the same ordered stage representation, never
+   mutate a packaged or VFS source in place. The existing draft editor is not
+   this document layer.
 
 Items 1 through 3 were all the same underlying discipline, and all three are now
 done: the preview does not let its own scaffolding — background, placeholder, or
@@ -1637,8 +1665,10 @@ The 196 `square` directives are the ones that mattered most: accepted,
 validated, and then quietly drawn as something else, which is the single
 outcome the fault-tolerance policy exists to prevent.
 
-The next work is `tcMod` ordering, which is the last place where a stage's
-declared meaning is reinterpreted rather than followed.
+The next work is closeout: keep the ScriptLib fixture and corpus census current,
+perform native platform smoke tests, and only broaden fidelity from observed
+shader failures. A lossless existing-source `ShaderDocument` remains the next
+separate authoring project if that capability becomes necessary.
 
 The old private-parser corpus work is not discarded: it identified the semantic
 boundaries that the ScriptLib-driven interpreter must preserve. What changed is

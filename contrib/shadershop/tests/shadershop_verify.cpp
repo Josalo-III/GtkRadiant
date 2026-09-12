@@ -1,9 +1,10 @@
 /*
    ShaderShop parser verification
 
-   Exercises the stage-model walk over Radiant's own ScriptLib tokenizer and
-   reports a census of the shader corpus.  ShaderShop no longer has a lexical
-   tokenizer to compare: production uses this same parser API.
+   Exercises the stage-model walk over Radiant's own ScriptLib table and
+   reports a current-semantics census of the shader corpus. ShaderShop no
+   longer has a lexical tokenizer to compare: production uses this same parser
+   API.
 
    Modes:
      --stages   print the stage model per shader definition, as a reference
@@ -32,15 +33,28 @@ static void Error( const char* message, ... ){
 }
 
 #include "radiant_parse.inc"
+#include "iscriplib.h"
 
 // =============================================================================
+
+static char* script_token(){ return token; }
+static int script_line(){ return scriptline; }
+
+// The plugin receives this table through Synapse.  The harness binds the real
+// parser entry points into the same table shape, so line-scoped reads exercise
+// the contract that production uses rather than a private token interface.
+static _QERScripLibTable g_scriptLib = {
+	1.0f, sizeof( _QERScripLibTable ),
+	GetToken, NULL, UngetToken, script_token, StartTokenParsing, script_line,
+	NULL, NULL, NULL
+};
 
 struct Stage
 {
 	std::string map, src, dst;
 	float fps;
 	int frames;
-	Stage() : src( "GL_SRC_ALPHA" ), dst( "GL_ONE_MINUS_SRC_ALPHA" ), fps( 0.0f ), frames( 0 ) {}
+	Stage() : src( "GL_ONE" ), dst( "GL_ZERO" ), fps( 0.0f ), frames( 0 ) {}
 };
 
 static bool ieq( const std::string& a, const char* b ){
@@ -52,18 +66,17 @@ static bool ieq( const std::string& a, const char* b ){
 }
 
 static const char* KNOWN_FACTORS[] = {
-	"GL_ONE", "GL_ZERO", "GL_DST_COLOR", "GL_ONE_MINUS_DST_COLOR",
-	"GL_SRC_ALPHA", "GL_ONE_MINUS_SRC_ALPHA", "GL_DST_ALPHA", "GL_ONE_MINUS_DST_ALPHA",
-	"one", "zero", "dst_color", "one_minus_dst_color",
-	"src_alpha", "one_minus_src_alpha", "dst_alpha", "one_minus_dst_alpha", 0
+	"GL_ZERO", "GL_ONE", "GL_SRC_COLOR", "GL_ONE_MINUS_SRC_COLOR",
+	"GL_DST_COLOR", "GL_ONE_MINUS_DST_COLOR", "GL_SRC_ALPHA",
+	"GL_ONE_MINUS_SRC_ALPHA", "GL_DST_ALPHA", "GL_ONE_MINUS_DST_ALPHA", 0
 };
 static bool known_factor( const std::string& t ){
-	for ( int i = 0; KNOWN_FACTORS[i]; ++i ) if ( t == KNOWN_FACTORS[i] ) return true;
+	for ( int i = 0; KNOWN_FACTORS[i]; ++i ) if ( ieq( t, KNOWN_FACTORS[i] ) ) return true;
 	return false;
 }
 
-static long c_defs, c_blend, c_kw, c_short, c_factor, c_wrong, c_srccolor;
-static long c_lightmap, c_whiteimage, c_clampmap, c_animmap;
+static long c_defs, c_stages, c_explicitBlend, c_shorthandBlend, c_unknownBlend, c_unknownFactor;
+static long c_lightmap, c_whiteimage, c_clampmap, c_animmap, c_tcmod;
 
 static char* slurp( const char* path, size_t& size ){
 	FILE* f = fopen( path, "rb" );
@@ -77,28 +90,28 @@ static char* slurp( const char* path, size_t& size ){
 }
 
 static bool next_token_on_line( int line, std::string& value ){
-	if ( !GetToken( true ) ) return false;
-	value = token;
-	if ( scriptline != line || value == "{" || value == "}" ) {
-		UngetToken();
+	if ( !g_scriptLib.m_pfnGetToken( true ) ) return false;
+	value = g_scriptLib.m_pfnToken();
+	if ( g_scriptLib.m_pfnScriptLine() != line || value == "{" || value == "}" ) {
+		g_scriptLib.m_pfnUnGetToken();
 		return false;
 	}
 	return true;
 }
 
 static void walk_stages( char* buf, bool census ){
-	StartTokenParsing( buf );
+	g_scriptLib.m_pfnStartTokenParsing( buf );
 	int depth = 0;
 	std::string name;
 	std::vector<Stage> stages;
 	Stage* cur = 0;
 
-	while ( GetToken( true ) ) {
-		std::string t = token;
+	while ( g_scriptLib.m_pfnGetToken( true ) ) {
+		std::string t = g_scriptLib.m_pfnToken();
 
 		if ( t == "{" ) {
 			++depth;
-			if ( depth == 2 ) { stages.push_back( Stage() ); cur = &stages.back(); }
+			if ( depth == 2 ) { stages.push_back( Stage() ); cur = &stages.back(); ++c_stages; }
 			continue;
 		}
 		if ( t == "}" ) {
@@ -121,7 +134,7 @@ static void walk_stages( char* buf, bool census ){
 		if ( depth != 2 || !cur ) continue;
 
 		std::vector<std::string> args;
-		const int directiveLine = scriptline;
+		const int directiveLine = g_scriptLib.m_pfnScriptLine();
 		for (;;) {
 			std::string argument;
 			if ( !next_token_on_line( directiveLine, argument ) ) break;
@@ -141,21 +154,20 @@ static void walk_stages( char* buf, bool census ){
 			if ( !args.empty() ) { cur->fps = (float)atof( args[0].c_str() ); cur->frames = (int)args.size() - 1; }
 		}
 		else if ( ieq( t, "blendFunc" ) ) {
-			++c_blend;
-			bool bad = false;
-			if ( t != "blendFunc" ) { ++c_kw; bad = true; }
-			if ( args.size() < 2 ) { ++c_short; bad = true; }
-			else {
-				if ( !known_factor( args[0] ) || !known_factor( args[1] ) ) {
-					++c_factor; bad = true;
-					std::string j = args[0] + args[1];
-					for ( size_t i = 0; i < j.size(); ++i ) j[i] = toupper( (unsigned char)j[i] );
-					if ( j.find( "SRC_COLOR" ) != std::string::npos ) ++c_srccolor;
-				}
+			if ( args.size() == 1 ) {
+				if ( ieq( args[0], "add" ) ) { cur->src = "GL_ONE"; cur->dst = "GL_ONE"; ++c_shorthandBlend; }
+				else if ( ieq( args[0], "filter" ) ) { cur->src = "GL_DST_COLOR"; cur->dst = "GL_ZERO"; ++c_shorthandBlend; }
+				else if ( ieq( args[0], "blend" ) ) { cur->src = "GL_SRC_ALPHA"; cur->dst = "GL_ONE_MINUS_SRC_ALPHA"; ++c_shorthandBlend; }
+				else ++c_unknownBlend;
+			}
+			else if ( args.size() >= 2 ) {
+				++c_explicitBlend;
+				if ( !known_factor( args[0] ) || !known_factor( args[1] ) ) ++c_unknownFactor;
 				cur->src = args[0]; cur->dst = args[1];
 			}
-			if ( bad ) ++c_wrong;
+			else ++c_unknownBlend;
 		}
+		else if ( ieq( t, "tcMod" ) ) ++c_tcmod;
 	}
 }
 
@@ -171,8 +183,8 @@ int main( int argc, char** argv ){
 	else if ( !strcmp( mode, "--census" ) ) {
 		walk_stages( buf, true );
 		printf( "%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\n",
-			c_defs, c_blend, c_kw, c_short, c_factor, c_wrong, c_srccolor,
-			c_lightmap, c_whiteimage, c_clampmap, c_animmap );
+			c_defs, c_stages, c_explicitBlend, c_shorthandBlend, c_unknownBlend, c_unknownFactor,
+			c_lightmap, c_whiteimage, c_clampmap, c_animmap, c_tcmod );
 	}
 	else { fprintf( stderr, "unknown mode %s\n", mode ); rc = 2; }
 
