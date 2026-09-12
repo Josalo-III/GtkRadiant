@@ -26,15 +26,21 @@ static GtkWidget* g_stageLabel = NULL;
 static GtkWidget* g_pEditorWindow = NULL;
 static GtkWidget* g_editorStageStack = NULL;
 static GtkWidget* g_editorStatusLabel = NULL;
+static GtkWidget* g_editorShaderNameEntry = NULL;
 static bool g_editorRebuilding = false;
 static bool g_editorDirty = false;
+static bool g_editorNewDocument = false;
 static GtkWidget* g_editorDropMarker = NULL;
 static int g_editorDragIndex = -1;
 static int g_editorDropIndex = -1;
 static bool g_editorDropAfter = false;
 
 static void rebuild_editor_stage_stack();
+static void editor_animation_reload_images();
 static GtkWidget* g_animationButton = NULL;
+static GtkWidget* g_animationResetButton = NULL;
+static GtkWidget* g_animationSpeedScale = NULL;
+static GtkWidget* g_animationTimeLabel = NULL;
 static GtkWidget* g_3dInspectButton = NULL;
 static GtkWidget* g_backdropButton = NULL;
 static GtkWidget* g_lightmapScale = NULL;
@@ -321,6 +327,7 @@ static bool stage_requires_tessellated_preview( const PreviewStage& stage ){
 }
 
 static std::vector<PreviewStage> g_stages;
+static std::string g_editorShaderName;
 
 // deformVertexes belongs to the material rather than to an individual stage.
 // The preview keeps its wave declarations separately so every rendered stage
@@ -436,11 +443,14 @@ static bool g_animationActive = false;
 static bool g_animationPaused = false;
 static gint64 g_animationResumed = 0;   // monotonic microseconds, 0 when paused
 static double g_animationElapsed = 0.0; // seconds accumulated before this run
+static double g_animationSpeed = 1.0;
+
+static void queue_preview_render();
 
 static double preview_seconds(){
 	double seconds = g_animationElapsed;
 	if ( g_animationResumed != 0 ) {
-		seconds += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0;
+		seconds += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0 * g_animationSpeed;
 	}
 	return seconds;
 }
@@ -455,7 +465,7 @@ static void preview_clock_reset(){
 
 static void preview_clock_pause(){
 	if ( g_animationResumed != 0 ) {
-		g_animationElapsed += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0;
+		g_animationElapsed += static_cast<double>( g_get_monotonic_time() - g_animationResumed ) / 1000000.0 * g_animationSpeed;
 		g_animationResumed = 0;
 	}
 }
@@ -782,13 +792,15 @@ static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClo
 			// Dropping it would renumber every later frame and silently change
 			// both the length and the content of the animation.
 			size_t loaded = 0;
+			bool hasNamedFrame = false;
 			for ( std::vector<std::string>::const_iterator name = stage->animationNames.begin(); name != stage->animationNames.end(); ++name ) {
 				AnimationFrame frame;
 				frame.name = *name;
-				if ( load_image( name->c_str(), &frame.pixels, &frame.width, &frame.height ) ) {
+				if ( !name->empty() ) hasNamedFrame = true;
+				if ( !name->empty() && load_image( name->c_str(), &frame.pixels, &frame.width, &frame.height ) ) {
 					++loaded;
 				}
-				else {
+				else if ( !name->empty() ) {
 					shadershop_warn(
 						"stage %d: animation frame %d ('%s') could not be loaded",
 						stageNumber, static_cast<int>( stage->animationFrames.size() ) + 1, name->c_str()
@@ -797,7 +809,7 @@ static void load_stage_images( std::vector<PreviewStage>& stages, bool updateClo
 				stage->animationFrames.push_back( frame );
 			}
 
-			if ( loaded == 0 ) {
+			if ( loaded == 0 && hasNamedFrame ) {
 				shadershop_warn( "stage %d: no animation frame could be loaded", stageNumber );
 			}
 			if ( updateClock && stage->animationFrames.size() > 1 && stage->animationFps > 0.0f ) {
@@ -1394,6 +1406,13 @@ static int animated_stage_count(){
 	return count;
 }
 
+static void update_animation_time_label(){
+	if ( g_animationTimeLabel == NULL ) return;
+	char text[64];
+	snprintf( text, sizeof( text ), "%.2fs", preview_seconds() );
+	gtk_label_set_text( GTK_LABEL( g_animationTimeLabel ), text );
+}
+
 static gboolean animation_tick( gpointer ){
 	if ( g_pPreviewWidget == NULL || !g_animationActive ) {
 		// Clear the id here too: returning FALSE destroys the source, and a
@@ -1408,6 +1427,7 @@ static gboolean animation_tick( gpointer ){
 #else
 	gtk_widget_queue_draw( g_pPreviewWidget );
 #endif
+	update_animation_time_label();
 	return TRUE;
 }
 
@@ -1428,7 +1448,12 @@ static void queue_preview_render(){
 	if ( gtk_widget_get_realized( g_pPreviewWidget ) ) {
 		GdkWindow* window = gtk_widget_get_window( g_pPreviewWidget );
 		if ( window != NULL ) {
+			// There is no supported replacement API that synchronously drives this
+			// window's pending paint cycle. Keep this narrowly-scoped Quartz
+			// workaround until the first-frame path no longer needs it.
+			G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 			gdk_window_process_updates( window, TRUE );
+			G_GNUC_END_IGNORE_DEPRECATIONS
 		}
 	}
 #else
@@ -1477,6 +1502,22 @@ static void animation_clicked( GtkButton*, gpointer ){
 		start_animation_timer();
 		gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Pause" );
 	}
+	update_animation_time_label();
+}
+
+static void animation_reset_clicked( GtkButton*, gpointer ){
+	preview_clock_reset();
+	update_animation_time_label();
+	queue_preview_render();
+}
+
+static void animation_speed_changed( GtkRange* range, gpointer ){
+	const bool wasRunning = g_animationResumed != 0;
+	if ( wasRunning ) preview_clock_pause();
+	g_animationSpeed = gtk_range_get_value( range );
+	if ( wasRunning ) preview_clock_resume();
+	update_animation_time_label();
+	queue_preview_render();
 }
 
 static const char* normalise_shader_name( const char* selected, std::string& storage ){
@@ -1572,6 +1613,9 @@ void ShaderShop_RefreshSelection(){
 		gtk_label_set_text( GTK_LABEL( g_pSelectionLabel ), text );
 
 		g_editorDirty = false;
+		g_editorNewDocument = false;
+		g_editorShaderName = selected;
+		if ( g_editorShaderNameEntry != NULL ) gtk_entry_set_text( GTK_ENTRY( g_editorShaderNameEntry ), g_editorShaderName.c_str() );
 		parse_selected_stages( selected );
 
 		if ( g_animationTimer != 0 ) {
@@ -1580,11 +1624,12 @@ void ShaderShop_RefreshSelection(){
 		}
 		g_animationPaused = false;
 		preview_clock_reset();
+		update_animation_time_label();
 		start_animation_timer();
 
 		if ( g_animationButton != NULL ) {
 			gtk_widget_set_sensitive( g_animationButton, g_animationActive );
-			gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Pause" );
+			gtk_button_set_label( GTK_BUTTON( g_animationButton ), g_animationActive ? "Pause" : "Play" );
 		}
 
 		clear_selected_image();
@@ -1627,6 +1672,7 @@ void ShaderShop_RefreshSelection(){
 			gtk_label_set_text( GTK_LABEL( g_stageLabel ), "Parsed stages: 0" );
 		}
 		g_editorDirty = false;
+		g_editorNewDocument = false;
 	}
 
 	rebuild_editor_stage_stack();
@@ -2272,8 +2318,8 @@ static void clear_backdrop(){
 
 // The control area carries two rows now, so the widgets are scaled down to keep
 // the preview surface dominant.
-static void preview_compact( GtkWidget* widget ){
 #if GTK_CHECK_VERSION( 3, 0, 0 )
+static GtkCssProvider* shadershop_style_provider(){
 	static GtkCssProvider* provider = NULL;
 	if ( provider == NULL ) {
 		provider = gtk_css_provider_new();
@@ -2281,16 +2327,28 @@ static void preview_compact( GtkWidget* widget ){
 			provider,
 			".shadershop-compact { font-size: 90%; }"
 			".shadershop-compact button { padding: 1px 6px; min-height: 0; }"
-			".shadershop-compact combobox button { padding: 1px 4px; }",
+			".shadershop-compact combobox button { padding: 1px 4px; }"
+			".shadershop-stage-number { background-color: #20242b; }"
+			".shadershop-stage-number-label { color: #d8d8d8; }",
 			-1, NULL
 		);
 	}
+	return provider;
+}
+
+static void shadershop_add_style_class( GtkWidget* widget, const char* className ){
 	gtk_style_context_add_provider(
 		gtk_widget_get_style_context( widget ),
-		GTK_STYLE_PROVIDER( provider ),
+		GTK_STYLE_PROVIDER( shadershop_style_provider() ),
 		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
 	);
-	gtk_style_context_add_class( gtk_widget_get_style_context( widget ), "shadershop-compact" );
+	gtk_style_context_add_class( gtk_widget_get_style_context( widget ), className );
+}
+#endif
+
+static void preview_compact( GtkWidget* widget ){
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	shadershop_add_style_class( widget, "shadershop-compact" );
 #else
 	(void)widget;
 #endif
@@ -2326,6 +2384,9 @@ static void preview_destroyed( GtkWidget*, gpointer ){
 	g_pSelectionLabel = NULL;
 	g_stageLabel = NULL;
 	g_animationButton = NULL;
+	g_animationResetButton = NULL;
+	g_animationSpeedScale = NULL;
+	g_animationTimeLabel = NULL;
 	g_3dInspectButton = NULL;
 	g_backdropButton = NULL;
 	g_lightmapScale = NULL;
@@ -2344,12 +2405,17 @@ static void preview_destroyed( GtkWidget*, gpointer ){
 static void editor_set_status(){
 	if ( g_editorStatusLabel == NULL ) return;
 	char status[256];
-	snprintf(
-		status, sizeof( status ),
-		"%d stage%s — %s draft; preview updates immediately, source files are untouched",
-		static_cast<int>( g_stages.size() ), g_stages.size() == 1 ? "" : "s",
-		g_editorDirty ? "modified" : "read-only"
-	);
+	if ( g_editorNewDocument && g_stages.empty() ) {
+		snprintf( status, sizeof( status ), "New shader draft — add a stage to begin; source files are untouched" );
+	}
+	else {
+		snprintf(
+			status, sizeof( status ),
+			"%d stage%s — %s %s; preview updates immediately, source files are untouched",
+			static_cast<int>( g_stages.size() ), g_stages.size() == 1 ? "" : "s",
+			g_editorNewDocument ? "new shader" : "shader", g_editorDirty ? "draft modified" : "draft"
+		);
+	}
 	gtk_label_set_text( GTK_LABEL( g_editorStatusLabel ), status );
 }
 
@@ -2379,19 +2445,57 @@ static GtkWidget* editor_blend_combo( const std::string& selected ){
 	return combo;
 }
 
+struct EditorBlendPreset
+{
+	const char* label;
+	const char* source;
+	const char* destination;
+};
+
+static const EditorBlendPreset g_editorBlendPresets[] = {
+	{ "Replace", "GL_ONE", "GL_ZERO" },
+	{ "Alpha blend", "GL_SRC_ALPHA", "GL_ONE_MINUS_SRC_ALPHA" },
+	{ "Add", "GL_ONE", "GL_ONE" },
+	{ "Alpha add", "GL_SRC_ALPHA", "GL_ONE" },
+	{ "Multiply", "GL_DST_COLOR", "GL_ZERO" },
+	{ "Screen", "GL_ONE", "GL_ONE_MINUS_SRC_COLOR" },
+	{ "Inverse multiply", "GL_ZERO", "GL_ONE_MINUS_SRC_COLOR" },
+	{ "Destination only", "GL_ZERO", "GL_ONE" }
+};
+
+static int editor_blend_preset_index( const PreviewStage& stage ){
+	for ( size_t i = 0; i < sizeof( g_editorBlendPresets ) / sizeof( g_editorBlendPresets[0] ); ++i ) {
+		if ( !strcasecmp( stage.blendSrc.c_str(), g_editorBlendPresets[i].source ) &&
+			 !strcasecmp( stage.blendDst.c_str(), g_editorBlendPresets[i].destination ) ) {
+			return static_cast<int>( i );
+		}
+	}
+	return static_cast<int>( sizeof( g_editorBlendPresets ) / sizeof( g_editorBlendPresets[0] ) );
+}
+
+static GtkWidget* editor_blend_mode_combo( const PreviewStage& stage ){
+	GtkWidget* combo = gtk_combo_box_text_new();
+	for ( size_t i = 0; i < sizeof( g_editorBlendPresets ) / sizeof( g_editorBlendPresets[0] ); ++i ) {
+		gtk_combo_box_text_append_text( GTK_COMBO_BOX_TEXT( combo ), g_editorBlendPresets[i].label );
+	}
+	gtk_combo_box_text_append_text( GTK_COMBO_BOX_TEXT( combo ), "Custom OpenGL factors" );
+	gtk_combo_box_set_active( GTK_COMBO_BOX( combo ), editor_blend_preset_index( stage ) );
+	return combo;
+}
+
 static const char* editor_blend_description( const PreviewStage& stage ){
 	const GLenum source = blend_factor( stage.blendSrc );
 	const GLenum destination = blend_factor( stage.blendDst );
-	if ( source == GL_ONE && destination == GL_ZERO ) return "Compositing: Replace — this stage is the new destination";
-	if ( source == GL_SRC_ALPHA && destination == GL_ONE_MINUS_SRC_ALPHA ) return "Compositing: Alpha blend — source alpha over the destination";
-	if ( source == GL_ONE && destination == GL_ONE ) return "Compositing: Add — brightens by adding source and destination";
-	if ( source == GL_SRC_ALPHA && destination == GL_ONE ) return "Compositing: Alpha add — adds the source through its alpha";
-	if ( source == GL_DST_COLOR && destination == GL_ZERO ) return "Compositing: Multiply — source darkens or tints the destination";
+	if ( source == GL_ONE && destination == GL_ZERO ) return "this stage becomes the destination";
+	if ( source == GL_SRC_ALPHA && destination == GL_ONE_MINUS_SRC_ALPHA ) return "source alpha over the destination";
+	if ( source == GL_ONE && destination == GL_ONE ) return "brightens by adding source and destination";
+	if ( source == GL_SRC_ALPHA && destination == GL_ONE ) return "adds the source through its alpha";
+	if ( source == GL_DST_COLOR && destination == GL_ZERO ) return "source darkens or tints the destination";
 	if ( ( source == GL_ONE && destination == GL_ONE_MINUS_SRC_COLOR ) ||
-		 ( source == GL_ONE_MINUS_DST_COLOR && destination == GL_ONE ) ) return "Compositing: Screen — brightens while preserving highlights";
-	if ( source == GL_ZERO && destination == GL_ONE_MINUS_SRC_COLOR ) return "Compositing: Inverse multiply — source darkens the destination by inverse color";
-	if ( source == GL_ZERO && destination == GL_ONE ) return "Compositing: Destination only — this stage does not contribute visible color";
-	return "Compositing: Custom OpenGL factors — inspect the source/destination pair";
+		 ( source == GL_ONE_MINUS_DST_COLOR && destination == GL_ONE ) ) return "brightens while preserving highlights";
+	if ( source == GL_ZERO && destination == GL_ONE_MINUS_SRC_COLOR ) return "source darkens the destination by inverse color";
+	if ( source == GL_ZERO && destination == GL_ONE ) return "this stage does not contribute visible color";
+	return "inspect the source/destination pair";
 }
 
 static void editor_blend_changed( GtkComboBox* combo, gpointer destination ){
@@ -2403,27 +2507,241 @@ static void editor_blend_changed( GtkComboBox* combo, gpointer destination ){
 	if ( GPOINTER_TO_INT( destination ) == 0 ) g_stages[index].blendSrc = value;
 	else g_stages[index].blendDst = value;
 	g_free( value );
-	GtkWidget* summary = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( combo ), "shadershop-blend-summary" ) );
-	if ( summary != NULL ) gtk_label_set_text( GTK_LABEL( summary ), editor_blend_description( g_stages[index] ) );
 	classify_destination_use();
 	editor_mark_dirty();
+	rebuild_editor_stage_stack();
 }
 
-static void editor_image_apply_clicked( GtkButton* button, gpointer ){
-	const int index = editor_stage_index( GTK_WIDGET( button ) );
-	GtkWidget* entry = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( button ), "shadershop-image-entry" ) );
-	if ( entry == NULL || index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
-	const char* name = gtk_entry_get_text( GTK_ENTRY( entry ) );
+static void editor_blend_mode_changed( GtkComboBox* combo, gpointer ){
+	if ( g_editorRebuilding ) return;
+	const int index = editor_stage_index( GTK_WIDGET( combo ) );
+	const int preset = gtk_combo_box_get_active( combo );
+	const int presetCount = static_cast<int>( sizeof( g_editorBlendPresets ) / sizeof( g_editorBlendPresets[0] ) );
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) || preset < 0 || preset >= presetCount ) return;
+	g_stages[index].blendSrc = g_editorBlendPresets[preset].source;
+	g_stages[index].blendDst = g_editorBlendPresets[preset].destination;
+	classify_destination_use();
+	editor_mark_dirty();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_apply_stage_image( int index, const char* name ){
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
 	PreviewStage& stage = g_stages[index];
 	clear_stage_images( stage );
 	stage.animationNames.clear();
 	stage.animationFps = 0.0f;
+	stage.generatedLightmap = false;
 	stage.mapName = name == NULL ? "" : name;
-	if ( !stage.mapName.empty() && !load_image( stage.mapName.c_str(), &stage.pixels, &stage.width, &stage.height ) ) {
-		shadershop_warn( "stage %d: image '%s' could not be loaded", index + 1, stage.mapName.c_str() );
-	}
 	editor_mark_dirty();
+	editor_animation_reload_images();
 	rebuild_editor_stage_stack();
+}
+
+static void editor_loaded_image_selected( GtkMenuItem* item, gpointer ){
+	const char* name = static_cast<const char*>( g_object_get_data( G_OBJECT( item ), "shadershop-image-name" ) );
+	if ( name == NULL || name[0] == '\0' ) return;
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( item ), "shadershop-stage-index" ) );
+	const int frameIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( item ), "shadershop-frame-index" ) );
+	std::string normalised;
+	const char* imageName = normalise_shader_name( name, normalised );
+	if ( frameIndex >= 0 && stageIndex >= 0 && stageIndex < static_cast<int>( g_stages.size() ) &&
+		 frameIndex < static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) {
+		g_stages[stageIndex].mapName.clear();
+		g_stages[stageIndex].animationNames[frameIndex] = imageName;
+		editor_mark_dirty();
+		editor_animation_reload_images();
+		rebuild_editor_stage_stack();
+	}
+	else {
+		editor_apply_stage_image( stageIndex, imageName );
+	}
+}
+
+static void editor_append_loaded_image_items( GtkWidget* menu, const std::vector<std::string>& names, int stageIndex, int frameIndex ){
+	std::string currentGroup;
+	GtkWidget* groupMenu = NULL;
+	for ( std::vector<std::string>::const_iterator name = names.begin(); name != names.end(); ++name ) {
+		const std::string::size_type slash = name->find_last_of( '/' );
+		const std::string group = slash == std::string::npos ? std::string( "(top level)" ) : name->substr( 0, slash );
+		const std::string leaf = slash == std::string::npos ? *name : name->substr( slash + 1 );
+		if ( groupMenu == NULL || group != currentGroup ) {
+			currentGroup = group;
+			groupMenu = gtk_menu_new();
+			GtkWidget* groupItem = gtk_menu_item_new_with_label( group.c_str() );
+			gtk_menu_item_set_submenu( GTK_MENU_ITEM( groupItem ), groupMenu );
+			gtk_menu_shell_append( GTK_MENU_SHELL( menu ), groupItem );
+			gtk_widget_show( groupItem );
+		}
+		GtkWidget* item = gtk_menu_item_new_with_label( leaf.c_str() );
+		g_object_set_data_full( G_OBJECT( item ), "shadershop-image-name", g_strdup( name->c_str() ), g_free );
+		g_object_set_data( G_OBJECT( item ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+		g_object_set_data( G_OBJECT( item ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+		g_signal_connect( G_OBJECT( item ), "activate", G_CALLBACK( editor_loaded_image_selected ), NULL );
+		gtk_menu_shell_append( GTK_MENU_SHELL( groupMenu ), item );
+		gtk_widget_show( item );
+	}
+}
+
+static void editor_image_choose_clicked( GtkButton* button, gpointer ){
+	const int index = editor_stage_index( GTK_WIDGET( button ) );
+	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
+
+	std::vector<std::string> names;
+	if ( g_FuncTable.m_pfnTextureCount != NULL && g_FuncTable.m_pfnGetTexture != NULL ) {
+		const int count = g_FuncTable.m_pfnTextureCount();
+		for ( int i = 0; i < count; ++i ) {
+			const char* name = g_FuncTable.m_pfnGetTexture( i );
+			if ( name != NULL && name[0] != '\0' ) names.push_back( name );
+		}
+	}
+	std::sort( names.begin(), names.end() );
+	names.erase( std::unique( names.begin(), names.end() ), names.end() );
+
+	GtkWidget* menu = gtk_menu_new();
+	if ( names.empty() ) {
+		GtkWidget* empty = gtk_menu_item_new_with_label( "No textures are currently loaded" );
+		gtk_widget_set_sensitive( empty, FALSE );
+		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), empty );
+		gtk_widget_show( empty );
+	}
+	else editor_append_loaded_image_items( menu, names, index, -1 );
+#if GTK_CHECK_VERSION( 3, 22, 0 )
+	gtk_menu_popup_at_widget( GTK_MENU( menu ), GTK_WIDGET( button ), GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST, NULL );
+#else
+	gtk_menu_popup( GTK_MENU( menu ), NULL, NULL, NULL, NULL, 0, gtk_get_current_event_time() );
+#endif
+}
+
+static void editor_update_animation_state(){
+	// Editing the list can turn the only animated stage into a static one.
+	// Rebuild the derived flag while retaining animation from deform and tcMod
+	// directives that came from the selected shader.
+	g_animationActive = false;
+	for ( std::vector<PreviewStage>::const_iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) {
+		if ( ( stage->animationNames.size() > 1 && stage->animationFps > 0.0f ) || stage->rgbWave || stage_has_animated_tcmod( *stage ) ) {
+			g_animationActive = true;
+			break;
+		}
+	}
+	if ( !g_animationActive ) {
+		for ( std::vector<PreviewDeformWave>::const_iterator deform = g_deformWaves.begin(); deform != g_deformWaves.end(); ++deform ) if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) { g_animationActive = true; break; }
+	}
+	if ( !g_animationActive ) {
+		for ( std::vector<PreviewDeformMove>::const_iterator deform = g_deformMoves.begin(); deform != g_deformMoves.end(); ++deform ) if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) { g_animationActive = true; break; }
+	}
+	if ( !g_animationActive ) {
+		for ( std::vector<PreviewDeformNormal>::const_iterator deform = g_deformNormals.begin(); deform != g_deformNormals.end(); ++deform ) if ( deform->amplitude != 0.0f && deform->frequency != 0.0f ) { g_animationActive = true; break; }
+	}
+	if ( !g_animationActive ) {
+		for ( std::vector<PreviewDeformBulge>::const_iterator deform = g_deformBulges.begin(); deform != g_deformBulges.end(); ++deform ) if ( deform->height != 0.0f && deform->speed != 0.0f ) { g_animationActive = true; break; }
+	}
+	if ( !g_animationActive && g_animationTimer != 0 ) {
+		g_source_remove( g_animationTimer );
+		g_animationTimer = 0;
+	}
+	if ( g_animationButton != NULL ) {
+		gtk_widget_set_sensitive( g_animationButton, g_animationActive );
+		gtk_button_set_label( GTK_BUTTON( g_animationButton ), g_animationActive && !g_animationPaused ? "Pause" : "Play" );
+	}
+	if ( g_animationActive && !g_animationPaused ) start_animation_timer();
+	update_animation_time_label();
+}
+
+static void editor_animation_reload_images(){
+	for ( std::vector<PreviewStage>::iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) clear_stage_images( *stage );
+	load_stage_images( g_stages, false );
+	editor_update_animation_state();
+}
+
+static void editor_animation_frame_activated( GtkEntry* entry, gpointer ){
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( entry ), "shadershop-stage-index" ) );
+	const int frameIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( entry ), "shadershop-frame-index" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || frameIndex < 0 || frameIndex >= static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) return;
+	g_stages[stageIndex].mapName.clear();
+	g_stages[stageIndex].animationNames[frameIndex] = gtk_entry_get_text( entry );
+	editor_mark_dirty();
+	editor_animation_reload_images();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_animation_frame_remove_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-stage-index" ) );
+	const int frameIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-frame-index" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || frameIndex < 0 || frameIndex >= static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) return;
+	g_stages[stageIndex].animationNames.erase( g_stages[stageIndex].animationNames.begin() + frameIndex );
+	editor_mark_dirty();
+	editor_animation_reload_images();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_animation_frame_move_clicked( GtkButton* button, gpointer direction ){
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-stage-index" ) );
+	const int frameIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-frame-index" ) );
+	const int delta = GPOINTER_TO_INT( direction );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || frameIndex < 0 || frameIndex >= static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) return;
+	const int other = frameIndex + delta;
+	if ( other < 0 || other >= static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) return;
+	std::swap( g_stages[stageIndex].animationNames[frameIndex], g_stages[stageIndex].animationNames[other] );
+	editor_mark_dirty();
+	editor_animation_reload_images();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_animation_frame_choose_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-stage-index" ) );
+	const int frameIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-frame-index" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || frameIndex < 0 || frameIndex >= static_cast<int>( g_stages[stageIndex].animationNames.size() ) ) return;
+	std::vector<std::string> names;
+	if ( g_FuncTable.m_pfnTextureCount != NULL && g_FuncTable.m_pfnGetTexture != NULL ) {
+		const int count = g_FuncTable.m_pfnTextureCount();
+		for ( int i = 0; i < count; ++i ) {
+			const char* name = g_FuncTable.m_pfnGetTexture( i );
+			if ( name != NULL && name[0] != '\0' ) names.push_back( name );
+		}
+	}
+	std::sort( names.begin(), names.end() );
+	names.erase( std::unique( names.begin(), names.end() ), names.end() );
+	GtkWidget* menu = gtk_menu_new();
+	if ( names.empty() ) {
+		GtkWidget* empty = gtk_menu_item_new_with_label( "No textures are currently loaded" );
+		gtk_widget_set_sensitive( empty, FALSE );
+		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), empty );
+		gtk_widget_show( empty );
+	}
+	else editor_append_loaded_image_items( menu, names, stageIndex, frameIndex );
+#if GTK_CHECK_VERSION( 3, 22, 0 )
+	gtk_menu_popup_at_widget( GTK_MENU( menu ), GTK_WIDGET( button ), GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST, NULL );
+#else
+	gtk_menu_popup( GTK_MENU( menu ), NULL, NULL, NULL, NULL, 0, gtk_get_current_event_time() );
+#endif
+}
+
+static void editor_animation_add_frame_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = editor_stage_index( GTK_WIDGET( button ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) ) return;
+	PreviewStage& stage = g_stages[stageIndex];
+	if ( stage.animationNames.size() >= ANIMATION_FRAME_LIMIT ) {
+		shadershop_warn( "stage %d: animation already has the engine limit of %d frames", stageIndex + 1, static_cast<int>( ANIMATION_FRAME_LIMIT ) );
+		return;
+	}
+	if ( stage.animationNames.empty() && !stage.mapName.empty() ) {
+		stage.animationNames.push_back( stage.mapName );
+		stage.mapName.clear();
+		stage.generatedLightmap = false;
+	}
+	stage.animationNames.push_back( "" );
+	if ( stage.animationNames.size() > 1 && stage.animationFps <= 0.0f ) stage.animationFps = 10.0f;
+	editor_mark_dirty();
+	editor_animation_reload_images();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_image_entry_activated( GtkEntry* entry, gpointer ){
+	editor_apply_stage_image(
+		GPOINTER_TO_INT( g_object_get_data( G_OBJECT( entry ), "shadershop-stage-index" ) ),
+		gtk_entry_get_text( entry )
+	);
 }
 
 static void editor_animation_rate_changed( GtkSpinButton* spin, gpointer ){
@@ -2432,6 +2750,7 @@ static void editor_animation_rate_changed( GtkSpinButton* spin, gpointer ){
 	if ( index < 0 || index >= static_cast<int>( g_stages.size() ) ) return;
 	g_stages[index].animationFps = static_cast<float>( gtk_spin_button_get_value( spin ) );
 	editor_mark_dirty();
+	editor_animation_reload_images();
 }
 
 static void editor_stage_remove_clicked( GtkButton* button, gpointer ){
@@ -2537,6 +2856,7 @@ static void editor_destroyed( GtkWidget*, gpointer ){
 	g_pEditorWindow = NULL;
 	g_editorStageStack = NULL;
 	g_editorStatusLabel = NULL;
+	g_editorShaderNameEntry = NULL;
 	editor_clear_drop_marker();
 	g_editorDragIndex = -1;
 }
@@ -2544,6 +2864,271 @@ static void editor_destroyed( GtkWidget*, gpointer ){
 static void editor_pack_row( GtkWidget* box, GtkWidget* child ){
 	gtk_box_pack_start( GTK_BOX( box ), child, FALSE, FALSE, 0 );
 	gtk_widget_show( child );
+}
+
+static GtkWidget* editor_horizontal_box( int spacing ){
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	return gtk_box_new( GTK_ORIENTATION_HORIZONTAL, spacing );
+#else
+	return gtk_hbox_new( FALSE, spacing );
+#endif
+}
+
+static const char* editor_wave_name( WaveForm form ){
+	switch ( form ) {
+	case WAVE_TRIANGLE:         return "triangle";
+	case WAVE_SQUARE:           return "square";
+	case WAVE_SAWTOOTH:         return "sawtooth";
+	case WAVE_INVERSE_SAWTOOTH: return "inversesawtooth";
+	case WAVE_SIN:              return "sin";
+	}
+	return "sin";
+}
+
+static GtkWidget* editor_wave_combo( WaveForm selected ){
+	GtkWidget* combo = gtk_combo_box_text_new();
+	static const WaveForm forms[] = { WAVE_SIN, WAVE_TRIANGLE, WAVE_SQUARE, WAVE_SAWTOOTH, WAVE_INVERSE_SAWTOOTH };
+	for ( size_t i = 0; i < sizeof( forms ) / sizeof( forms[0] ); ++i ) {
+		gtk_combo_box_text_append_text( GTK_COMBO_BOX_TEXT( combo ), editor_wave_name( forms[i] ) );
+		if ( forms[i] == selected ) gtk_combo_box_set_active( GTK_COMBO_BOX( combo ), static_cast<int>( i ) );
+	}
+	return combo;
+}
+
+static WaveForm editor_selected_wave( GtkComboBox* combo ){
+	switch ( gtk_combo_box_get_active( combo ) ) {
+	case 1: return WAVE_TRIANGLE;
+	case 2: return WAVE_SQUARE;
+	case 3: return WAVE_SAWTOOTH;
+	case 4: return WAVE_INVERSE_SAWTOOTH;
+	default: return WAVE_SIN;
+	}
+}
+
+static const char* editor_tcmod_name( TcModKind kind ){
+	switch ( kind ) {
+	case TCMOD_SCROLL:    return "scroll";
+	case TCMOD_ROTATE:    return "rotate";
+	case TCMOD_SCALE:     return "scale";
+	case TCMOD_TRANSFORM: return "transform";
+	case TCMOD_STRETCH:   return "stretch";
+	case TCMOD_TURB:      return "turb";
+	}
+	return "unknown";
+}
+
+static void editor_tcmod_value_changed( GtkSpinButton* spin, gpointer ){
+	if ( g_editorRebuilding ) return;
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( spin ), "shadershop-stage-index" ) );
+	const int operationIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( spin ), "shadershop-tcmod-index" ) );
+	const int valueIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( spin ), "shadershop-tcmod-value" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || operationIndex < 0 || operationIndex >= static_cast<int>( g_stages[stageIndex].tcModOperations.size() ) || valueIndex < 0 || valueIndex >= 6 ) return;
+	g_stages[stageIndex].tcModOperations[operationIndex].values[valueIndex] = static_cast<float>( gtk_spin_button_get_value( spin ) );
+	editor_mark_dirty();
+	editor_update_animation_state();
+}
+
+static void editor_tcmod_wave_changed( GtkComboBox* combo, gpointer ){
+	if ( g_editorRebuilding ) return;
+	const int stageIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( combo ), "shadershop-stage-index" ) );
+	const int operationIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( combo ), "shadershop-tcmod-index" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || operationIndex < 0 || operationIndex >= static_cast<int>( g_stages[stageIndex].tcModOperations.size() ) ) return;
+	g_stages[stageIndex].tcModOperations[operationIndex].waveForm = editor_selected_wave( combo );
+	editor_mark_dirty();
+}
+
+static void editor_rgb_wave_value_changed( GtkSpinButton* spin, gpointer valueIndex ){
+	if ( g_editorRebuilding ) return;
+	const int stageIndex = editor_stage_index( GTK_WIDGET( spin ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) ) return;
+	const float value = static_cast<float>( gtk_spin_button_get_value( spin ) );
+	switch ( GPOINTER_TO_INT( valueIndex ) ) {
+	case 0: g_stages[stageIndex].rgbBase = value; break;
+	case 1: g_stages[stageIndex].rgbAmplitude = value; break;
+	case 2: g_stages[stageIndex].rgbPhase = value; break;
+	case 3: g_stages[stageIndex].rgbFrequency = value; break;
+	default: return;
+	}
+	editor_mark_dirty();
+	editor_update_animation_state();
+}
+
+static void editor_rgb_wave_changed( GtkComboBox* combo, gpointer ){
+	if ( g_editorRebuilding ) return;
+	const int stageIndex = editor_stage_index( GTK_WIDGET( combo ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) ) return;
+	g_stages[stageIndex].rgbWaveForm = editor_selected_wave( combo );
+	editor_mark_dirty();
+}
+
+static void editor_animation_remove_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = editor_stage_index( GTK_WIDGET( button ) );
+	const int operationIndex = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( button ), "shadershop-tcmod-index" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || operationIndex < 0 || operationIndex >= static_cast<int>( g_stages[stageIndex].tcModOperations.size() ) ) return;
+	g_stages[stageIndex].tcModOperations.erase( g_stages[stageIndex].tcModOperations.begin() + operationIndex );
+	editor_mark_dirty();
+	editor_update_animation_state();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_rgb_wave_remove_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = editor_stage_index( GTK_WIDGET( button ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) ) return;
+	g_stages[stageIndex].rgbWave = false;
+	editor_mark_dirty();
+	editor_update_animation_state();
+	rebuild_editor_stage_stack();
+}
+
+static void editor_animation_add_clicked( GtkButton* button, gpointer ){
+	const int stageIndex = editor_stage_index( GTK_WIDGET( button ) );
+	GtkWidget* kindCombo = static_cast<GtkWidget*>( g_object_get_data( G_OBJECT( button ), "shadershop-animation-kind" ) );
+	if ( stageIndex < 0 || stageIndex >= static_cast<int>( g_stages.size() ) || kindCombo == NULL ) return;
+	const int kind = gtk_combo_box_get_active( GTK_COMBO_BOX( kindCombo ) );
+	if ( kind == 6 ) {
+		if ( g_stages[stageIndex].rgbWave ) {
+			shadershop_warn( "stage %d: rgbGen wave already has a control", stageIndex + 1 );
+			return;
+		}
+		g_stages[stageIndex].rgbWave = true;
+		g_stages[stageIndex].rgbWaveForm = WAVE_SIN;
+		g_stages[stageIndex].rgbBase = 1.0f;
+		g_stages[stageIndex].rgbAmplitude = 0.0f;
+		g_stages[stageIndex].rgbPhase = 0.0f;
+		g_stages[stageIndex].rgbFrequency = 0.0f;
+	}
+	else if ( kind >= 0 && kind <= 5 ) {
+		const TcModKind kinds[] = { TCMOD_SCROLL, TCMOD_ROTATE, TCMOD_SCALE, TCMOD_TRANSFORM, TCMOD_STRETCH, TCMOD_TURB };
+		TcModOperation operation( kinds[kind], 0 );
+		if ( operation.kind == TCMOD_SCALE ) {
+			operation.values[0] = operation.values[1] = 1.0f;
+		}
+		else if ( operation.kind == TCMOD_TRANSFORM ) {
+			operation.values[0] = operation.values[3] = 1.0f;
+		}
+		else if ( operation.kind == TCMOD_STRETCH ) {
+			operation.values[0] = 1.0f;
+		}
+		g_stages[stageIndex].tcModOperations.push_back( operation );
+	}
+	else return;
+	editor_mark_dirty();
+	editor_update_animation_state();
+	rebuild_editor_stage_stack();
+}
+
+static GtkWidget* editor_transform_spin( float value, int stageIndex, int operationIndex, int valueIndex ){
+	GtkWidget* spin = gtk_spin_button_new_with_range( -1000000.0, 1000000.0, 0.01 );
+	gtk_spin_button_set_digits( GTK_SPIN_BUTTON( spin ), 6 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( spin ), value );
+	g_object_set_data( G_OBJECT( spin ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+	g_object_set_data( G_OBJECT( spin ), "shadershop-tcmod-index", GINT_TO_POINTER( operationIndex ) );
+	g_object_set_data( G_OBJECT( spin ), "shadershop-tcmod-value", GINT_TO_POINTER( valueIndex ) );
+	g_signal_connect( G_OBJECT( spin ), "value-changed", G_CALLBACK( editor_tcmod_value_changed ), NULL );
+	return spin;
+}
+
+static void editor_append_transform_value( GtkWidget* row, const char* label, float value, int stageIndex, int operationIndex, int valueIndex ){
+	editor_pack_row( row, gtk_label_new( label ) );
+	editor_pack_row( row, editor_transform_spin( value, stageIndex, operationIndex, valueIndex ) );
+}
+
+static void editor_append_tcmod_controls( GtkWidget* transforms, const PreviewStage& stage, int stageIndex ){
+	if ( !stage.rgbWave && stage.tcModOperations.empty() ) {
+		editor_pack_row( transforms, gtk_label_new( "No texture or colour animations in this stage." ) );
+	}
+	else editor_pack_row( transforms, gtk_label_new( "Texture and colour transforms from the shader source:" ) );
+	for ( int operationIndex = 0; operationIndex < static_cast<int>( stage.tcModOperations.size() ); ++operationIndex ) {
+		const TcModOperation& operation = stage.tcModOperations[operationIndex];
+		GtkWidget* row = editor_horizontal_box( 3 );
+		char source[80];
+		if ( operation.sourceLine > 0 ) snprintf( source, sizeof( source ), "tcMod %s (line %d):", editor_tcmod_name( operation.kind ), operation.sourceLine );
+		else snprintf( source, sizeof( source ), "tcMod %s (added):", editor_tcmod_name( operation.kind ) );
+		editor_pack_row( row, gtk_label_new( source ) );
+		switch ( operation.kind ) {
+		case TCMOD_SCROLL:
+			editor_append_transform_value( row, "scroll S", operation.values[0], stageIndex, operationIndex, 0 );
+			editor_append_transform_value( row, "T", operation.values[1], stageIndex, operationIndex, 1 );
+			break;
+		case TCMOD_ROTATE:
+			editor_append_transform_value( row, "rotate °/s", operation.values[0], stageIndex, operationIndex, 0 );
+			break;
+		case TCMOD_SCALE:
+			editor_append_transform_value( row, "scale S", operation.values[0], stageIndex, operationIndex, 0 );
+			editor_append_transform_value( row, "T", operation.values[1], stageIndex, operationIndex, 1 );
+			break;
+		case TCMOD_TRANSFORM:
+			editor_append_transform_value( row, "a", operation.values[0], stageIndex, operationIndex, 0 );
+			editor_append_transform_value( row, "b", operation.values[1], stageIndex, operationIndex, 1 );
+			editor_append_transform_value( row, "c", operation.values[2], stageIndex, operationIndex, 2 );
+			editor_append_transform_value( row, "d", operation.values[3], stageIndex, operationIndex, 3 );
+			editor_append_transform_value( row, "translate S", operation.values[4], stageIndex, operationIndex, 4 );
+			editor_append_transform_value( row, "T", operation.values[5], stageIndex, operationIndex, 5 );
+			break;
+		case TCMOD_STRETCH: {
+			editor_pack_row( row, gtk_label_new( "stretch" ) );
+			GtkWidget* wave = editor_wave_combo( operation.waveForm );
+			g_object_set_data( G_OBJECT( wave ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+			g_object_set_data( G_OBJECT( wave ), "shadershop-tcmod-index", GINT_TO_POINTER( operationIndex ) );
+			g_signal_connect( G_OBJECT( wave ), "changed", G_CALLBACK( editor_tcmod_wave_changed ), NULL );
+			editor_pack_row( row, wave );
+			editor_append_transform_value( row, "base", operation.values[0], stageIndex, operationIndex, 0 );
+			editor_append_transform_value( row, "amp", operation.values[1], stageIndex, operationIndex, 1 );
+			editor_append_transform_value( row, "phase", operation.values[2], stageIndex, operationIndex, 2 );
+			editor_append_transform_value( row, "Hz", operation.values[3], stageIndex, operationIndex, 3 );
+			break;
+		}
+		case TCMOD_TURB:
+			editor_append_transform_value( row, "turb base", operation.values[0], stageIndex, operationIndex, 0 );
+			editor_append_transform_value( row, "amp", operation.values[1], stageIndex, operationIndex, 1 );
+			editor_append_transform_value( row, "phase", operation.values[2], stageIndex, operationIndex, 2 );
+			editor_append_transform_value( row, "Hz", operation.values[3], stageIndex, operationIndex, 3 );
+			break;
+		}
+		GtkWidget* remove = gtk_button_new_with_label( "Remove" );
+		g_object_set_data( G_OBJECT( remove ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+		g_object_set_data( G_OBJECT( remove ), "shadershop-tcmod-index", GINT_TO_POINTER( operationIndex ) );
+		g_signal_connect( G_OBJECT( remove ), "clicked", G_CALLBACK( editor_animation_remove_clicked ), NULL );
+		editor_pack_row( row, remove );
+		editor_pack_row( transforms, row );
+	}
+	if ( stage.rgbWave ) {
+		GtkWidget* row = editor_horizontal_box( 3 );
+		editor_pack_row( row, gtk_label_new( "rgbGen wave:" ) );
+		GtkWidget* wave = editor_wave_combo( stage.rgbWaveForm );
+		g_object_set_data( G_OBJECT( wave ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+		g_signal_connect( G_OBJECT( wave ), "changed", G_CALLBACK( editor_rgb_wave_changed ), NULL );
+		editor_pack_row( row, wave );
+		static const char* labels[] = { "base", "amp", "phase", "Hz" };
+		const float values[] = { stage.rgbBase, stage.rgbAmplitude, stage.rgbPhase, stage.rgbFrequency };
+		for ( int valueIndex = 0; valueIndex < 4; ++valueIndex ) {
+			editor_pack_row( row, gtk_label_new( labels[valueIndex] ) );
+			GtkWidget* spin = gtk_spin_button_new_with_range( -1000000.0, 1000000.0, 0.01 );
+			gtk_spin_button_set_digits( GTK_SPIN_BUTTON( spin ), 6 );
+			gtk_spin_button_set_value( GTK_SPIN_BUTTON( spin ), values[valueIndex] );
+			g_object_set_data( G_OBJECT( spin ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+			g_signal_connect( G_OBJECT( spin ), "value-changed", G_CALLBACK( editor_rgb_wave_value_changed ), GINT_TO_POINTER( valueIndex ) );
+			editor_pack_row( row, spin );
+		}
+		GtkWidget* remove = gtk_button_new_with_label( "Remove" );
+		g_object_set_data( G_OBJECT( remove ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+		g_signal_connect( G_OBJECT( remove ), "clicked", G_CALLBACK( editor_rgb_wave_remove_clicked ), NULL );
+		editor_pack_row( row, remove );
+		editor_pack_row( transforms, row );
+	}
+	GtkWidget* addRow = editor_horizontal_box( 3 );
+	editor_pack_row( addRow, gtk_label_new( "Add animation:" ) );
+	GtkWidget* kind = gtk_combo_box_text_new();
+	static const char* kinds[] = { "tcMod scroll", "tcMod rotate", "tcMod scale", "tcMod transform", "tcMod stretch", "tcMod turb", "rgbGen wave" };
+	for ( size_t i = 0; i < sizeof( kinds ) / sizeof( kinds[0] ); ++i ) gtk_combo_box_text_append_text( GTK_COMBO_BOX_TEXT( kind ), kinds[i] );
+	gtk_combo_box_set_active( GTK_COMBO_BOX( kind ), 0 );
+	editor_pack_row( addRow, kind );
+	GtkWidget* add = gtk_button_new_with_label( "Add" );
+	g_object_set_data( G_OBJECT( add ), "shadershop-stage-index", GINT_TO_POINTER( stageIndex ) );
+	g_object_set_data( G_OBJECT( add ), "shadershop-animation-kind", kind );
+	g_signal_connect( G_OBJECT( add ), "clicked", G_CALLBACK( editor_animation_add_clicked ), NULL );
+	editor_pack_row( addRow, add );
+	editor_pack_row( transforms, addRow );
 }
 
 static void editor_append_stage( int index ){
@@ -2565,8 +3150,11 @@ static void editor_append_stage( int index ){
 	GtkWidget* contentRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
 	GtkWidget* body = gtk_box_new( GTK_ORIENTATION_VERTICAL, 4 );
 	GtkWidget* imageRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* modeRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
 	GtkWidget* blendRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* transformList = gtk_box_new( GTK_ORIENTATION_VERTICAL, 2 );
 	GtkWidget* animationRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
+	GtkWidget* frameList = gtk_box_new( GTK_ORIENTATION_VERTICAL, 2 );
 	GtkWidget* orderRow = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 4 );
 #else
 	GtkWidget* slotRow = gtk_hbox_new( FALSE, 0 );
@@ -2574,22 +3162,33 @@ static void editor_append_stage( int index ){
 	GtkWidget* contentRow = gtk_hbox_new( FALSE, 4 );
 	GtkWidget* body = gtk_vbox_new( FALSE, 4 );
 	GtkWidget* imageRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* modeRow = gtk_hbox_new( FALSE, 4 );
 	GtkWidget* blendRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* transformList = gtk_vbox_new( FALSE, 2 );
 	GtkWidget* animationRow = gtk_hbox_new( FALSE, 4 );
+	GtkWidget* frameList = gtk_vbox_new( FALSE, 2 );
 	GtkWidget* orderRow = gtk_hbox_new( FALSE, 4 );
 #endif
 	gtk_container_add( GTK_CONTAINER( slot ), slotRow );
 	gtk_widget_show( slotRow );
 	GtkWidget* stageChrome = gtk_event_box_new();
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	shadershop_add_style_class( stageChrome, "shadershop-stage-number" );
+#else
 	GdkColor darkChrome;
 	darkChrome.red = 0x2020; darkChrome.green = 0x2424; darkChrome.blue = 0x2b2b;
 	gtk_widget_modify_bg( stageChrome, GTK_STATE_NORMAL, &darkChrome );
+#endif
 	char number[16];
 	snprintf( number, sizeof( number ), "%d", index + 1 );
 	GtkWidget* numberLabel = gtk_label_new( number );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	shadershop_add_style_class( numberLabel, "shadershop-stage-number-label" );
+#else
 	GdkColor lightText;
 	lightText.red = 0xd8d8; lightText.green = 0xd8d8; lightText.blue = 0xd8d8;
 	gtk_widget_modify_fg( numberLabel, GTK_STATE_NORMAL, &lightText );
+#endif
 	gtk_widget_set_size_request( stageChrome, 36, -1 );
 	gtk_container_add( GTK_CONTAINER( stageChrome ), numberLabel );
 	gtk_box_pack_start( GTK_BOX( slotRow ), stageChrome, FALSE, FALSE, 0 );
@@ -2624,22 +3223,42 @@ static void editor_append_stage( int index ){
 	gtk_container_add( GTK_CONTAINER( frame ), body );
 	gtk_widget_show( body );
 	editor_pack_row( body, imageRow );
+	editor_pack_row( body, modeRow );
 	editor_pack_row( body, blendRow );
 
 	GtkWidget* imageLabel = gtk_label_new( "Image (VFS path):" );
 	editor_pack_row( imageRow, imageLabel );
 	GtkWidget* imageEntry = gtk_entry_new();
 	gtk_entry_set_text( GTK_ENTRY( imageEntry ), stage.mapName.c_str() );
-	gtk_widget_set_tooltip_text( imageEntry, "Use game-relative names such as textures/myset/image.tga; this does not write a file." );
+	gtk_widget_set_tooltip_text( imageEntry, "Use game-relative names such as textures/myset/image.tga; press Return to load a manually entered VFS path." );
+	g_object_set_data( G_OBJECT( imageEntry ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( imageEntry ), "activate", G_CALLBACK( editor_image_entry_activated ), NULL );
 	gtk_box_pack_start( GTK_BOX( imageRow ), imageEntry, TRUE, TRUE, 0 );
 	gtk_widget_show( imageEntry );
 	GtkWidget* load = gtk_button_new_with_label( "Load" );
+	gtk_widget_set_tooltip_text( load, "Choose from Radiant's currently loaded textures" );
 	g_object_set_data( G_OBJECT( load ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
-	g_object_set_data( G_OBJECT( load ), "shadershop-image-entry", imageEntry );
-	g_signal_connect( G_OBJECT( load ), "clicked", G_CALLBACK( editor_image_apply_clicked ), NULL );
+	g_signal_connect( G_OBJECT( load ), "clicked", G_CALLBACK( editor_image_choose_clicked ), NULL );
 	editor_pack_row( imageRow, load );
 
-	editor_pack_row( blendRow, gtk_label_new( "Blend:" ) );
+	editor_pack_row( modeRow, gtk_label_new( "Blend mode:" ) );
+	GtkWidget* mode = editor_blend_mode_combo( stage );
+	g_object_set_data( G_OBJECT( mode ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( mode ), "changed", G_CALLBACK( editor_blend_mode_changed ), NULL );
+	editor_pack_row( modeRow, mode );
+	GtkWidget* blendSummary = gtk_label_new( editor_blend_description( stage ) );
+	gtk_label_set_line_wrap( GTK_LABEL( blendSummary ), TRUE );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	gtk_label_set_xalign( GTK_LABEL( blendSummary ), 0.0f );
+	gtk_label_set_yalign( GTK_LABEL( blendSummary ), 0.5f );
+#else
+	gtk_misc_set_alignment( GTK_MISC( blendSummary ), 0.0f, 0.5f );
+#endif
+	editor_pack_row( modeRow, blendSummary );
+	editor_append_tcmod_controls( transformList, stage, index );
+	editor_pack_row( body, transformList );
+
+	editor_pack_row( blendRow, gtk_label_new( "OpenGL factors:" ) );
 	GtkWidget* source = editor_blend_combo( stage.blendSrc );
 	g_object_set_data( G_OBJECT( source ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
 	g_signal_connect( G_OBJECT( source ), "changed", G_CALLBACK( editor_blend_changed ), NULL );
@@ -2649,27 +3268,72 @@ static void editor_append_stage( int index ){
 	g_object_set_data( G_OBJECT( destination ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
 	g_signal_connect( G_OBJECT( destination ), "changed", G_CALLBACK( editor_blend_changed ), GINT_TO_POINTER( 1 ) );
 	editor_pack_row( blendRow, destination );
-	GtkWidget* blendSummary = gtk_label_new( editor_blend_description( stage ) );
-	gtk_label_set_line_wrap( GTK_LABEL( blendSummary ), TRUE );
-	gtk_misc_set_alignment( GTK_MISC( blendSummary ), 0.0f, 0.5f );
-	g_object_set_data( G_OBJECT( source ), "shadershop-blend-summary", blendSummary );
-	g_object_set_data( G_OBJECT( destination ), "shadershop-blend-summary", blendSummary );
-	editor_pack_row( body, blendSummary );
 	editor_pack_row( body, animationRow );
 	editor_pack_row( body, orderRow );
 
 	char animationText[128];
 	if ( stage.animationNames.size() > 1 ) snprintf( animationText, sizeof( animationText ), "Animation: %d frames at", static_cast<int>( stage.animationNames.size() ) );
+	else if ( stage.animationNames.size() == 1 ) snprintf( animationText, sizeof( animationText ), "Animation: 1 frame" );
 	else snprintf( animationText, sizeof( animationText ), "Animation: static image" );
 	editor_pack_row( animationRow, gtk_label_new( animationText ) );
 	GtkWidget* rate = gtk_spin_button_new_with_range( 0.0, 60.0, 0.1 );
 	gtk_spin_button_set_value( GTK_SPIN_BUTTON( rate ), stage.animationFps );
 	gtk_widget_set_sensitive( rate, stage.animationNames.size() > 1 );
-	gtk_widget_set_tooltip_text( rate, "animMap frames per second. Frame-list editing will be added with the source document." );
+	gtk_widget_set_tooltip_text( rate, "animMap frames per second" );
 	g_object_set_data( G_OBJECT( rate ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
 	g_signal_connect( G_OBJECT( rate ), "value-changed", G_CALLBACK( editor_animation_rate_changed ), NULL );
 	editor_pack_row( animationRow, rate );
 	editor_pack_row( animationRow, gtk_label_new( "fps" ) );
+	GtkWidget* addFrame = gtk_button_new_with_label( "Add Frame" );
+	gtk_widget_set_tooltip_text( addFrame, "Add an animMap frame; a static image becomes the first frame" );
+	g_object_set_data( G_OBJECT( addFrame ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+	g_signal_connect( G_OBJECT( addFrame ), "clicked", G_CALLBACK( editor_animation_add_frame_clicked ), NULL );
+	editor_pack_row( animationRow, addFrame );
+
+	if ( stage.animationNames.empty() ) {
+		editor_pack_row( frameList, gtk_label_new( "No animation frames — add one to convert this stage to animMap." ) );
+	}
+	else {
+		for ( int frameIndex = 0; frameIndex < static_cast<int>( stage.animationNames.size() ); ++frameIndex ) {
+			GtkWidget* frameRow = editor_horizontal_box( 3 );
+			char frameLabel[32];
+			snprintf( frameLabel, sizeof( frameLabel ), "Frame %d:", frameIndex + 1 );
+			editor_pack_row( frameRow, gtk_label_new( frameLabel ) );
+			GtkWidget* frameEntry = gtk_entry_new();
+			gtk_entry_set_text( GTK_ENTRY( frameEntry ), stage.animationNames[frameIndex].c_str() );
+			gtk_widget_set_tooltip_text( frameEntry, "Game-relative image path; press Return to load this frame" );
+			g_object_set_data( G_OBJECT( frameEntry ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+			g_object_set_data( G_OBJECT( frameEntry ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+			g_signal_connect( G_OBJECT( frameEntry ), "activate", G_CALLBACK( editor_animation_frame_activated ), NULL );
+			gtk_box_pack_start( GTK_BOX( frameRow ), frameEntry, TRUE, TRUE, 0 );
+			gtk_widget_show( frameEntry );
+			GtkWidget* choose = gtk_button_new_with_label( "Load" );
+			gtk_widget_set_tooltip_text( choose, "Choose a loaded texture for this frame" );
+			g_object_set_data( G_OBJECT( choose ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+			g_object_set_data( G_OBJECT( choose ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+			g_signal_connect( G_OBJECT( choose ), "clicked", G_CALLBACK( editor_animation_frame_choose_clicked ), NULL );
+			editor_pack_row( frameRow, choose );
+			GtkWidget* up = gtk_button_new_with_label( "↑" );
+			g_object_set_data( G_OBJECT( up ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+			g_object_set_data( G_OBJECT( up ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+			g_signal_connect( G_OBJECT( up ), "clicked", G_CALLBACK( editor_animation_frame_move_clicked ), GINT_TO_POINTER( -1 ) );
+			gtk_widget_set_sensitive( up, frameIndex > 0 );
+			editor_pack_row( frameRow, up );
+			GtkWidget* down = gtk_button_new_with_label( "↓" );
+			g_object_set_data( G_OBJECT( down ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+			g_object_set_data( G_OBJECT( down ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+			g_signal_connect( G_OBJECT( down ), "clicked", G_CALLBACK( editor_animation_frame_move_clicked ), GINT_TO_POINTER( 1 ) );
+			gtk_widget_set_sensitive( down, frameIndex + 1 < static_cast<int>( stage.animationNames.size() ) );
+			editor_pack_row( frameRow, down );
+			GtkWidget* remove = gtk_button_new_with_label( "Remove" );
+			g_object_set_data( G_OBJECT( remove ), "shadershop-stage-index", GINT_TO_POINTER( index ) );
+			g_object_set_data( G_OBJECT( remove ), "shadershop-frame-index", GINT_TO_POINTER( frameIndex ) );
+			g_signal_connect( G_OBJECT( remove ), "clicked", G_CALLBACK( editor_animation_frame_remove_clicked ), NULL );
+			editor_pack_row( frameRow, remove );
+			editor_pack_row( frameList, frameRow );
+		}
+	}
+	editor_pack_row( body, frameList );
 
 	editor_pack_row( orderRow, gtk_label_new( "Reorder using the grip at left." ) );
 	GtkWidget* remove = gtk_button_new_with_label( "Remove Stage" );
@@ -2697,14 +3361,129 @@ static void rebuild_editor_stage_stack(){
 	editor_set_status();
 }
 
+static void editor_source_appendf( std::string& source, const char* format, ... ){
+	char text[512];
+	va_list args;
+	va_start( args, format );
+	vsnprintf( text, sizeof( text ), format, args );
+	va_end( args );
+	source += text;
+}
+
+static bool editor_build_shader_source( const std::string& shaderName, std::string& source, std::string& error ){
+	if ( shaderName.empty() ) {
+		error = "Enter a shader name before saving.";
+		return false;
+	}
+	if ( g_stages.empty() ) {
+		error = "Add at least one stage before saving.";
+		return false;
+	}
+	source = shaderName + "\n{\n";
+	for ( std::vector<PreviewStage>::const_iterator stage = g_stages.begin(); stage != g_stages.end(); ++stage ) {
+		if ( stage->animationNames.empty() && stage->mapName.empty() ) {
+			error = "Every stage needs an image or animation frame.";
+			return false;
+		}
+		for ( std::vector<std::string>::const_iterator frame = stage->animationNames.begin(); frame != stage->animationNames.end(); ++frame ) {
+			if ( frame->empty() ) {
+				error = "Every animation frame needs an image path.";
+				return false;
+			}
+		}
+		source += "\t{\n";
+		if ( !stage->animationNames.empty() ) {
+			editor_source_appendf( source, "\t\tanimMap %g", stage->animationFps );
+			for ( std::vector<std::string>::const_iterator frame = stage->animationNames.begin(); frame != stage->animationNames.end(); ++frame ) source += " " + *frame;
+			source += "\n";
+		}
+		else editor_source_appendf( source, "\t\t%s %s\n", stage->clamp ? "clampmap" : "map", stage->mapName.c_str() );
+		if ( !stage->blendSrc.empty() && !stage->blendDst.empty() ) editor_source_appendf( source, "\t\tblendFunc %s %s\n", stage->blendSrc.c_str(), stage->blendDst.c_str() );
+		if ( stage->alphaFunction == GL_GREATER ) source += "\t\talphaFunc GT0\n";
+		else if ( stage->alphaFunction == GL_LESS ) source += "\t\talphaFunc LT128\n";
+		else if ( stage->alphaFunction == GL_GEQUAL ) source += "\t\talphaFunc GE128\n";
+		if ( stage->environmentTexGen ) source += "\t\ttcGen environment\n";
+		for ( std::vector<TcModOperation>::const_iterator operation = stage->tcModOperations.begin(); operation != stage->tcModOperations.end(); ++operation ) {
+			switch ( operation->kind ) {
+			case TCMOD_SCROLL: editor_source_appendf( source, "\t\ttcMod scroll %g %g\n", operation->values[0], operation->values[1] ); break;
+			case TCMOD_ROTATE: editor_source_appendf( source, "\t\ttcMod rotate %g\n", operation->values[0] ); break;
+			case TCMOD_SCALE: editor_source_appendf( source, "\t\ttcMod scale %g %g\n", operation->values[0], operation->values[1] ); break;
+			case TCMOD_TRANSFORM: editor_source_appendf( source, "\t\ttcMod transform %g %g %g %g %g %g\n", operation->values[0], operation->values[1], operation->values[2], operation->values[3], operation->values[4], operation->values[5] ); break;
+			case TCMOD_STRETCH: editor_source_appendf( source, "\t\ttcMod stretch %s %g %g %g %g\n", editor_wave_name( operation->waveForm ), operation->values[0], operation->values[1], operation->values[2], operation->values[3] ); break;
+			case TCMOD_TURB: editor_source_appendf( source, "\t\ttcMod turb %g %g %g %g\n", operation->values[0], operation->values[1], operation->values[2], operation->values[3] ); break;
+			}
+		}
+		if ( stage->rgbWave ) editor_source_appendf( source, "\t\trgbGen wave %s %g %g %g %g\n", editor_wave_name( stage->rgbWaveForm ), stage->rgbBase, stage->rgbAmplitude, stage->rgbPhase, stage->rgbFrequency );
+		source += "\t}\n";
+	}
+	source += "}\n";
+	return true;
+}
+
+static void editor_save_clicked( GtkButton*, gpointer ){
+	const char* shaderNameText = g_editorShaderNameEntry == NULL ? g_editorShaderName.c_str() : gtk_entry_get_text( GTK_ENTRY( g_editorShaderNameEntry ) );
+	const std::string shaderName = shaderNameText == NULL ? "" : shaderNameText;
+	std::string source;
+	std::string error;
+	if ( !editor_build_shader_source( shaderName, source, error ) ) {
+		g_FuncTable.m_pfnMessageBox( g_pEditorWindow, error.c_str(), "Save Shader", MB_OK, NULL );
+		return;
+	}
+	GtkWidget* chooser = gtk_file_chooser_dialog_new(
+		"Save New Shader", GTK_WINDOW( g_pEditorWindow ), GTK_FILE_CHOOSER_ACTION_SAVE,
+		"_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, (const char*)NULL
+	);
+	gtk_file_chooser_set_do_overwrite_confirmation( GTK_FILE_CHOOSER( chooser ), FALSE );
+	gtk_file_chooser_set_current_name( GTK_FILE_CHOOSER( chooser ), "new.shader" );
+	if ( g_FuncTable.m_pfnGetGamePath != NULL ) {
+		const char* base = g_FuncTable.m_pfnGetGamePath();
+		if ( base != NULL && base[0] != '\0' ) gtk_file_chooser_set_current_folder( GTK_FILE_CHOOSER( chooser ), base );
+	}
+	GtkFileFilter* scripts = gtk_file_filter_new();
+	gtk_file_filter_set_name( scripts, "Shader scripts (*.shader)" );
+	gtk_file_filter_add_pattern( scripts, "*.shader" );
+	gtk_file_chooser_add_filter( GTK_FILE_CHOOSER( chooser ), scripts );
+	if ( gtk_dialog_run( GTK_DIALOG( chooser ) ) == GTK_RESPONSE_ACCEPT ) {
+		char* filename = gtk_file_chooser_get_filename( GTK_FILE_CHOOSER( chooser ) );
+		if ( filename != NULL ) {
+			std::string path = filename;
+			const std::string::size_type dot = path.find_last_of( '.' );
+			if ( dot == std::string::npos || strcasecmp( path.c_str() + dot, ".shader" ) != 0 ) path += ".shader";
+			gchar* basename = g_path_get_basename( path.c_str() );
+			bool overwrite = true;
+			if ( g_file_test( path.c_str(), G_FILE_TEST_EXISTS ) ) {
+				char warning[512];
+				snprintf( warning, sizeof( warning ), "Are you sure you want to overwrite %s, and all of it's shaders?", basename );
+				overwrite = g_FuncTable.m_pfnMessageBox( g_pEditorWindow, warning, "Save Shader", MB_YESNO | MB_ICONWARNING, NULL ) == IDYES;
+			}
+			if ( overwrite ) {
+				GError* writeError = NULL;
+				if ( !g_file_set_contents( path.c_str(), source.c_str(), static_cast<gssize>( source.size() ), &writeError ) ) {
+					g_FuncTable.m_pfnMessageBox( g_pEditorWindow, writeError == NULL ? "Could not write shader file." : writeError->message, "Save Shader", MB_OK, NULL );
+					if ( writeError != NULL ) g_error_free( writeError );
+				}
+				else {
+					g_editorDirty = false;
+					editor_set_status();
+				}
+			}
+			g_free( basename );
+			g_free( filename );
+		}
+	}
+	gtk_widget_destroy( chooser );
+}
+
 static void edit_shader_clicked( GtkButton*, gpointer ){
+	const char* title = g_editorNewDocument ? "ShaderShop — New Shader" : "ShaderShop — Stage Editor";
 	if ( g_pEditorWindow != NULL ) {
+		gtk_window_set_title( GTK_WINDOW( g_pEditorWindow ), title );
 		rebuild_editor_stage_stack();
 		gtk_window_present( GTK_WINDOW( g_pEditorWindow ) );
 		return;
 	}
 	g_pEditorWindow = gtk_window_new( GTK_WINDOW_TOPLEVEL );
-	gtk_window_set_title( GTK_WINDOW( g_pEditorWindow ), "ShaderShop — Stage Editor" );
+	gtk_window_set_title( GTK_WINDOW( g_pEditorWindow ), title );
 	gtk_window_set_default_size( GTK_WINDOW( g_pEditorWindow ), 560, 560 );
 	if ( g_pPreviewWindow != NULL ) gtk_window_set_transient_for( GTK_WINDOW( g_pEditorWindow ), GTK_WINDOW( g_pPreviewWindow ) );
 	g_signal_connect( G_OBJECT( g_pEditorWindow ), "destroy", G_CALLBACK( editor_destroyed ), NULL );
@@ -2718,9 +3497,26 @@ static void edit_shader_clicked( GtkButton*, gpointer ){
 	gtk_widget_show( box );
 	GtkWidget* heading = gtk_label_new( "Ordered shader stages — the dark number gutter is a fixed position. Drag a stage by its grip to the highlighted insertion point." );
 	gtk_label_set_line_wrap( GTK_LABEL( heading ), TRUE );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	gtk_label_set_xalign( GTK_LABEL( heading ), 0.0f );
+	gtk_label_set_yalign( GTK_LABEL( heading ), 0.5f );
+#else
 	gtk_misc_set_alignment( GTK_MISC( heading ), 0.0f, 0.5f );
+#endif
 	gtk_box_pack_start( GTK_BOX( box ), heading, FALSE, FALSE, 0 );
 	gtk_widget_show( heading );
+	GtkWidget* nameRow = editor_horizontal_box( 4 );
+	editor_pack_row( nameRow, gtk_label_new( "Shader name:" ) );
+	g_editorShaderNameEntry = gtk_entry_new();
+	gtk_entry_set_text( GTK_ENTRY( g_editorShaderNameEntry ), g_editorShaderName.c_str() );
+	gtk_widget_set_tooltip_text( g_editorShaderNameEntry, "Name written into the new shader file" );
+	gtk_box_pack_start( GTK_BOX( nameRow ), g_editorShaderNameEntry, TRUE, TRUE, 0 );
+	gtk_widget_show( g_editorShaderNameEntry );
+	GtkWidget* save = gtk_button_new_with_label( "Save New Shader..." );
+	gtk_widget_set_tooltip_text( save, "Write this draft to a new loose .shader file" );
+	g_signal_connect( G_OBJECT( save ), "clicked", G_CALLBACK( editor_save_clicked ), NULL );
+	editor_pack_row( nameRow, save );
+	editor_pack_row( box, nameRow );
 	GtkWidget* scroll = gtk_scrolled_window_new( NULL, NULL );
 	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( scroll ), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
 	gtk_box_pack_start( GTK_BOX( box ), scroll, TRUE, TRUE, 0 );
@@ -2731,11 +3527,20 @@ static void edit_shader_clicked( GtkButton*, gpointer ){
 	g_editorStageStack = gtk_vbox_new( FALSE, 6 );
 #endif
 	gtk_container_set_border_width( GTK_CONTAINER( g_editorStageStack ), 4 );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	gtk_container_add( GTK_CONTAINER( scroll ), g_editorStageStack );
+#else
 	gtk_scrolled_window_add_with_viewport( GTK_SCROLLED_WINDOW( scroll ), g_editorStageStack );
+#endif
 	gtk_widget_show( g_editorStageStack );
 	g_editorStatusLabel = gtk_label_new( "" );
 	gtk_label_set_line_wrap( GTK_LABEL( g_editorStatusLabel ), TRUE );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	gtk_label_set_xalign( GTK_LABEL( g_editorStatusLabel ), 0.0f );
+	gtk_label_set_yalign( GTK_LABEL( g_editorStatusLabel ), 0.5f );
+#else
 	gtk_misc_set_alignment( GTK_MISC( g_editorStatusLabel ), 0.0f, 0.5f );
+#endif
 	gtk_box_pack_start( GTK_BOX( box ), g_editorStatusLabel, FALSE, FALSE, 0 );
 	gtk_widget_show( g_editorStatusLabel );
 	rebuild_editor_stage_stack();
@@ -2915,21 +3720,12 @@ static bool load_backdrop_from_active_shader( const char* shaderName ){
 
 static void backdrop_shader_selected( GtkMenuItem* item, gpointer ){
 	const char* name = static_cast<const char*>( g_object_get_data( G_OBJECT( item ), "shadershop-name" ) );
-	if ( name == NULL ) {
-		return;
-	}
-	if ( load_backdrop_from_active_shader( name ) ) {
-		g_backdropMode = BACKDROP_MODE_IMAGE;
-	}
-	else {
-		g_FuncTable.m_pfnSysFPrintf( SYS_WRN, "ShaderShop: could not use '%s' as a backdrop\n", name );
-	}
+	if ( name == NULL ) return;
+	if ( load_backdrop_from_active_shader( name ) ) g_backdropMode = BACKDROP_MODE_IMAGE;
+	else g_FuncTable.m_pfnSysFPrintf( SYS_WRN, "ShaderShop: could not use '%s' as a backdrop\n", name );
 	ShaderShop_RefreshSelection();
 }
 
-// Group by the directory part of the shader name.  The active list runs to
-// thousands of entries, so one flat menu would be unusable; the grouping is the
-// same one the texture browser presents.
 static void append_shader_items( GtkWidget* menu, const std::vector<std::string>& names ){
 	std::string currentGroup;
 	GtkWidget* groupMenu = NULL;
@@ -2937,7 +3733,6 @@ static void append_shader_items( GtkWidget* menu, const std::vector<std::string>
 		const std::string::size_type slash = name->find_last_of( '/' );
 		const std::string group = slash == std::string::npos ? std::string( "(top level)" ) : name->substr( 0, slash );
 		const std::string leaf = slash == std::string::npos ? *name : name->substr( slash + 1 );
-
 		if ( groupMenu == NULL || group != currentGroup ) {
 			currentGroup = group;
 			groupMenu = gtk_menu_new();
@@ -2946,12 +3741,11 @@ static void append_shader_items( GtkWidget* menu, const std::vector<std::string>
 			gtk_menu_shell_append( GTK_MENU_SHELL( menu ), groupItem );
 			gtk_widget_show( groupItem );
 		}
-
-		GtkWidget* item = gtk_menu_item_new_with_label( leaf.c_str() );
-		g_object_set_data_full( G_OBJECT( item ), "shadershop-name", g_strdup( name->c_str() ), g_free );
-		g_signal_connect( G_OBJECT( item ), "activate", G_CALLBACK( backdrop_shader_selected ), NULL );
-		gtk_menu_shell_append( GTK_MENU_SHELL( groupMenu ), item );
-		gtk_widget_show( item );
+		GtkWidget* child = gtk_menu_item_new_with_label( leaf.c_str() );
+		g_object_set_data_full( G_OBJECT( child ), "shadershop-name", g_strdup( name->c_str() ), g_free );
+		g_signal_connect( G_OBJECT( child ), "activate", G_CALLBACK( backdrop_shader_selected ), NULL );
+		gtk_menu_shell_append( GTK_MENU_SHELL( groupMenu ), child );
+		gtk_widget_show( child );
 	}
 }
 
@@ -3020,14 +3814,12 @@ static void backdrop_choose_clicked( GtkButton*, gpointer ){
 }
 
 static void backdrop_mode_selected( GtkMenuItem* item, gpointer ){
-	const gpointer mode = g_object_get_data( G_OBJECT( item ), "shadershop-mode" );
-	g_backdropMode = static_cast<BackdropMode>( GPOINTER_TO_INT( mode ) );
+	g_backdropMode = static_cast<BackdropMode>( GPOINTER_TO_INT( g_object_get_data( G_OBJECT( item ), "shadershop-mode" ) ) );
 	ShaderShop_RefreshSelection();
 }
 
 static void backdrop_menu_clicked( GtkButton* button, gpointer ){
 	GtkWidget* menu = gtk_menu_new();
-
 	static const char* modeLabels[] = { "Auto", "Checkerboard", "Lightmap", "Dark" };
 	for ( int i = 0; i < 4; ++i ) {
 		GtkWidget* item = gtk_menu_item_new_with_label( modeLabels[i] );
@@ -3036,29 +3828,21 @@ static void backdrop_menu_clicked( GtkButton* button, gpointer ){
 		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), item );
 		gtk_widget_show( item );
 	}
-
 	GtkWidget* separator = gtk_separator_menu_item_new();
 	gtk_menu_shell_append( GTK_MENU_SHELL( menu ), separator );
 	gtk_widget_show( separator );
 
-	// Shaders already loaded with the current map. Split so the handful actually
-	// used by the map is reachable without walking the whole texture set.
 	std::vector<std::string> inUse;
 	std::vector<std::string> loaded;
 	if ( g_ShadersTable.m_pfnGetActiveShaderCount != NULL && g_ShadersTable.m_pfnActiveShader_ForIndex != NULL ) {
 		const int count = g_ShadersTable.m_pfnGetActiveShaderCount();
 		for ( int i = 0; i < count; ++i ) {
 			IShader* shader = g_ShadersTable.m_pfnActiveShader_ForIndex( i );
-			if ( shader == NULL || shader->getName() == NULL || shader->getName()[0] == '\0' ) {
-				continue;
-			}
-			if ( shader->IsInUse() ) {
-				inUse.push_back( shader->getName() );
-			}
+			if ( shader == NULL || shader->getName() == NULL || shader->getName()[0] == '\0' ) continue;
+			if ( shader->IsInUse() ) inUse.push_back( shader->getName() );
 			loaded.push_back( shader->getName() );
 		}
 	}
-
 	if ( !inUse.empty() ) {
 		GtkWidget* item = gtk_menu_item_new_with_label( "Used by this map" );
 		GtkWidget* sub = gtk_menu_new();
@@ -3067,7 +3851,6 @@ static void backdrop_menu_clicked( GtkButton* button, gpointer ){
 		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), item );
 		gtk_widget_show( item );
 	}
-
 	if ( !loaded.empty() ) {
 		GtkWidget* item = gtk_menu_item_new_with_label( "All loaded shaders" );
 		GtkWidget* sub = gtk_menu_new();
@@ -3076,22 +3859,13 @@ static void backdrop_menu_clicked( GtkButton* button, gpointer ){
 		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), item );
 		gtk_widget_show( item );
 	}
-	else {
-		GtkWidget* item = gtk_menu_item_new_with_label( "No shaders loaded" );
-		gtk_widget_set_sensitive( item, FALSE );
-		gtk_menu_shell_append( GTK_MENU_SHELL( menu ), item );
-		gtk_widget_show( item );
-	}
-
 	GtkWidget* separator2 = gtk_separator_menu_item_new();
 	gtk_menu_shell_append( GTK_MENU_SHELL( menu ), separator2 );
 	gtk_widget_show( separator2 );
-
 	GtkWidget* fromFile = gtk_menu_item_new_with_label( "From file..." );
 	g_signal_connect( G_OBJECT( fromFile ), "activate", G_CALLBACK( backdrop_choose_clicked ), NULL );
 	gtk_menu_shell_append( GTK_MENU_SHELL( menu ), fromFile );
 	gtk_widget_show( fromFile );
-
 #if GTK_CHECK_VERSION( 3, 22, 0 )
 	gtk_menu_popup_at_widget( GTK_MENU( menu ), GTK_WIDGET( button ), GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST, NULL );
 #else
@@ -3106,14 +3880,34 @@ static void lightmap_level_changed( GtkRange* range, gpointer ){
 }
 
 static void create_shader_clicked( GtkButton*, gpointer ){
-	g_FuncTable.m_pfnMessageBox(
-		g_pPreviewWindow,
-		"Creating a new shader needs the source document layer, which is not built yet.\n\n"
-		"It will author a loose scripts/*.shader file rather than modifying any PK3.",
-		"ShaderShop",
-		MB_OK,
-		NULL
-	);
+	// A new shader begins as an isolated preview draft.  It is intentionally
+	// empty: the editor shows only Add Stage until the author supplies content.
+	// No shader file is allocated or modified until the future document/save
+	// layer is in place.
+	if ( g_animationTimer != 0 ) {
+		g_source_remove( g_animationTimer );
+		g_animationTimer = 0;
+	}
+	clear_stages();
+	clear_selected_image();
+	g_editorImageName.clear();
+	g_editorShaderName.clear();
+	g_previewBackdrop = BACKDROP_CHECKER;
+	g_shaderSourceState = SHADER_SOURCE_RAW_IMAGE;
+	g_editorDirty = false;
+	g_editorNewDocument = true;
+	g_animationPaused = false;
+	preview_clock_reset();
+	update_animation_time_label();
+	if ( g_pSelectionLabel != NULL ) gtk_label_set_text( GTK_LABEL( g_pSelectionLabel ), "New shader draft — add stages in the editor" );
+	if ( g_editorShaderNameEntry != NULL ) gtk_entry_set_text( GTK_ENTRY( g_editorShaderNameEntry ), "" );
+	if ( g_stageLabel != NULL ) gtk_label_set_text( GTK_LABEL( g_stageLabel ), "Parsed stages: 0 — new draft" );
+	if ( g_animationButton != NULL ) {
+		gtk_widget_set_sensitive( g_animationButton, FALSE );
+		gtk_button_set_label( GTK_BUTTON( g_animationButton ), "Play" );
+	}
+	queue_preview_render();
+	edit_shader_clicked( NULL, NULL );
 }
 
 static gboolean preview_button_press( GtkWidget*, GdkEventButton* event, gpointer ){
@@ -3216,8 +4010,10 @@ void ShaderShop_Show(){
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "map-event", G_CALLBACK( preview_mapped_or_configured ), NULL );
 	g_signal_connect( G_OBJECT( g_pPreviewWidget ), "configure-event", G_CALLBACK( preview_mapped_or_configured ), NULL );
 	gtk_container_add( GTK_CONTAINER( frame ), g_pPreviewWidget );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
 	gtk_widget_set_hexpand( g_pPreviewWidget, TRUE );
 	gtk_widget_set_vexpand( g_pPreviewWidget, TRUE );
+#endif
 	gtk_widget_show( g_pPreviewWidget );
 
 	// Row one reports what is being shown; row two is where it is controlled.
@@ -3286,6 +4082,31 @@ void ShaderShop_Show(){
 	gtk_box_pack_start( GTK_BOX( controls ), g_animationButton, FALSE, FALSE, 0 );
 	gtk_widget_show( g_animationButton );
 
+	g_animationResetButton = gtk_button_new_with_label( "Reset" );
+	gtk_widget_set_tooltip_text( g_animationResetButton, "Return shader animation to time zero" );
+	g_signal_connect( G_OBJECT( g_animationResetButton ), "clicked", G_CALLBACK( animation_reset_clicked ), NULL );
+	gtk_box_pack_start( GTK_BOX( controls ), g_animationResetButton, FALSE, FALSE, 0 );
+	gtk_widget_show( g_animationResetButton );
+
+	GtkWidget* speedLabel = gtk_label_new( "Speed:" );
+	gtk_box_pack_start( GTK_BOX( controls ), speedLabel, FALSE, FALSE, 0 );
+	gtk_widget_show( speedLabel );
+#if GTK_CHECK_VERSION( 3, 0, 0 )
+	g_animationSpeedScale = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, 0.25, 2.0, 0.05 );
+#else
+	g_animationSpeedScale = gtk_hscale_new_with_range( 0.25, 2.0, 0.05 );
+#endif
+	gtk_scale_set_draw_value( GTK_SCALE( g_animationSpeedScale ), FALSE );
+	gtk_range_set_value( GTK_RANGE( g_animationSpeedScale ), g_animationSpeed );
+	gtk_widget_set_size_request( g_animationSpeedScale, 70, -1 );
+	gtk_widget_set_tooltip_text( g_animationSpeedScale, "Preview playback speed, from quarter speed to double speed" );
+	g_signal_connect( G_OBJECT( g_animationSpeedScale ), "value-changed", G_CALLBACK( animation_speed_changed ), NULL );
+	gtk_box_pack_start( GTK_BOX( controls ), g_animationSpeedScale, FALSE, FALSE, 0 );
+	gtk_widget_show( g_animationSpeedScale );
+	g_animationTimeLabel = gtk_label_new( "0.00s" );
+	gtk_box_pack_start( GTK_BOX( controls ), g_animationTimeLabel, FALSE, FALSE, 0 );
+	gtk_widget_show( g_animationTimeLabel );
+
 	g_3dInspectButton = gtk_toggle_button_new_with_label( "3D" );
 	gtk_widget_set_tooltip_text( g_3dInspectButton, "Left drag: orbit; right or middle drag: pan; wheel: zoom" );
 	g_signal_connect( G_OBJECT( g_3dInspectButton ), "toggled", G_CALLBACK( inspect_3d_toggled ), NULL );
@@ -3298,7 +4119,7 @@ void ShaderShop_Show(){
 	gtk_box_pack_end( GTK_BOX( controls ), edit, FALSE, FALSE, 0 );
 	gtk_widget_show( edit );
 
-	GtkWidget* create = gtk_button_new_with_label( "Create Shader..." );
+	GtkWidget* create = gtk_button_new_with_label( "New" );
 	g_signal_connect( G_OBJECT( create ), "clicked", G_CALLBACK( create_shader_clicked ), NULL );
 	gtk_box_pack_end( GTK_BOX( controls ), create, FALSE, FALSE, 0 );
 	gtk_widget_show( create );
