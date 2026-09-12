@@ -3953,6 +3953,8 @@ void CGameInstall::ScanGames() {
 			m_availGames[ iGame++ ] = GAME_UNVANQUISHED;
 		}
 	}
-	Sys_Printf( "No installable games found in: %s\n",
-				pakPaths.GetBuffer() );
+	if ( iGame == 0 ) {
+		Sys_Printf( "No installable games found in: %s\n",
+					pakPaths.GetBuffer() );
+	}
 }

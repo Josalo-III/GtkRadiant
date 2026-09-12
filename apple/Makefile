@@ -47,6 +47,7 @@ install: -pre-install -gtk-runtime
 	test -d $(INSTALL)/installs/Q3Pack
 	cp -r $(INSTALL) $(RESOURCES)
 	rm -rf `find $(RESOURCES)/install -type d -name .svn`
+	find $(RESOURCES)/install -name .DS_Store -delete
 	# Game paths are per-user state.  The bundled Q3Pack drives the first-run
 	# configuration dialog; never publish a developer's generated q3.game.
 	rm -f $(RESOURCES)/install/games/q3.game
@@ -83,5 +84,10 @@ image:
 	hdiutil create -ov $(DMG) -srcfolder $(DMGROOT) -volname $(VOLUME_NAME)
 	rm -rf $(DMGROOT)
 
+# Keep finished disk images when rebuilding the application bundle: published
+# previews must not disappear merely because a later bundle is rebuilt.
 clean:
+	rm -rf $(TARGET)/GtkRadiant.app $(DMGROOT)
+
+distclean:
 	rm -rf $(TARGET)/*

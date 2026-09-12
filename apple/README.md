@@ -6,7 +6,10 @@ This directory provides packaging steps for GtkRadiant for OSX. This document de
 Dependencies & Compilation
 --------------------------
 
-Directions for OSX Mavericks 10.9 - your mileage may vary:
+The maintained local path targets Apple silicon on macOS 11 or newer, GTK3,
+and XQuartz. It uses the platform-neutral gamepacks from the official
+GtkRadiant 1.6.7 distribution rather than updating historical development
+gamepacks through SVN.
 
 - Install [MacPorts](http://macports.org).
 - Install [XQuartz](http://xquartz.macosforge.org/)
@@ -14,22 +17,30 @@ Directions for OSX Mavericks 10.9 - your mileage may vary:
 - Install dependencies with MacPorts:
 
 ```
-sudo port install dylibbundler pkgconfig gtkglext scons
+sudo port install dylibbundler pkgconfig gtk3 scons
 ```
 
 - Get the GtkRadiant code and compile:
 
 ```
-git clone https://github.com/TTimo/GtkRadiant.git
+git clone https://github.com/Josalo-III/GtkRadiant.git
 cd GtkRadiant/
-scons
+
+# Verify and stage all twelve official gamepacks once. The archive is not
+# committed to the repository.
+apple/stage-official-gamepacks.sh \
+  "/absolute/path/GtkRadiant-1.6.7-20230820.zip"
+
+# Build and run the editor without contacting the historical SVN gamepack
+# service. On the ShaderShop branch this also builds the plugin.
+apple/run-shadershop.sh
 ```
 
 - Run the build:
 
 (from the GtkRadiant/ directory)
 ```
-./install/radiant.bin
+apple/macos-env.sh ./install/radiant.bin
 ```
 
 XQuartz note: on my configuration XQuartz doesn't automatically start for some reason. I have to open another terminal, and run the following command: `/Applications/Utilities/XQuartz.app/Contents/MacOS/X11.bin`, then start radiant. 
@@ -37,7 +48,9 @@ XQuartz note: on my configuration XQuartz doesn't automatically start for some r
 Building GtkRadiant.app
 -----------------------
 
-The `Makefile` in the 'apple/' directory will produce a distributable .app bundle for GtkRadiant using `dylibbundler`:
+The `Makefile` in the 'apple/' directory produces a distributable .app bundle
+using `dylibbundler`. It packages the staged official gamepacks and removes any
+checkout-specific `q3.game` before the first launch:
 
 ```
 make

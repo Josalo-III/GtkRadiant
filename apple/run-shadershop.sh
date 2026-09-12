@@ -18,12 +18,27 @@
 #
 # Set GTKRADIANT_DEPS_PREFIX to override the default /opt/local dependency
 # prefix; see apple/macos-env.sh.
+#
+# The normal path uses the verified official 1.6.7 gamepacks and never invokes
+# the historical live-SVN gamepack fetcher.  To bootstrap a fresh checkout,
+# set GTKRADIANT_GAMEPACK_ARCHIVE to the official distribution ZIP.
 
 set -eu
 
 here=$( cd "$( dirname "$0" )" && pwd )
 root=$( cd "$here/.." && pwd )
 cd "$root"
+
+if [ ! -d install/installs/Q3Pack/install ]; then
+	if [ -n "${GTKRADIANT_GAMEPACK_ARCHIVE-}" ]; then
+		apple/stage-official-gamepacks.sh "$GTKRADIANT_GAMEPACK_ARCHIVE"
+	else
+		echo "error: official gamepacks are not staged" >&2
+		echo "       set GTKRADIANT_GAMEPACK_ARCHIVE to GtkRadiant-1.6.7-20230820.zip," >&2
+		echo "       or run apple/stage-official-gamepacks.sh with that archive first." >&2
+		exit 1
+	fi
+fi
 
 scons_extra=""
 if [ "${1-}" = "--" ]; then
@@ -45,7 +60,7 @@ done
 
 echo "== building GtkRadiant and ShaderShop =="
 # shellcheck disable=SC2086
-apple/macos-env.sh scons -j10 $scons_extra target=radiant \
+apple/macos-env.sh scons -j10 --no-packs $scons_extra target=radiant \
 	cc=/usr/bin/clang cxx=/usr/bin/clang++ \
 	install/radiant.bin install/modules/shadershop.so
 
