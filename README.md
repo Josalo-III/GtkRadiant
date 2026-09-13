@@ -1,20 +1,31 @@
-GtkRadiant
-==========
+ShaderShop for GtkRadiant
+==========================
 
-![logo](https://icculus.org/gtkradiant/images/logo-radiant.png)
+ShaderShop is a GtkRadiant branch for visual Quake III shader work. Its native
+plugin previews selected shader stages and supports authoring ordered draft
+shaders directly in the editor, while retaining GtkRadiant's level editor, map
+compilers, and data-authoring tools.
 
-GtkRadiant is an open-source, cross-platform level editor for id Tech based games. It comes with some map compilers and data authoring tools.
+The preview and draft-authoring workflow is ready for use. Editing an existing
+shader definition is intentionally not presented as a lossless round-trip yet:
+comments, whitespace, unknown directives, and original spelling must remain
+preserved before that capability is claimed. See the
+[ShaderShop plan](docs/shadershop-plan.md) for the compatibility contract and
+remaining scope.
 
 Downloads
 ---------
 
-Ready-to-use GtkRadiant packages are available on the [Downloads page](http://icculus.org/gtkradiant/downloads.html) on GtkRadiant's website. Some [installation instruction](https://icculus.org/gtkradiant/installation.html) may be useful.
+Apple-silicon macOS preview builds are published on this repository's
+[Releases page](https://github.com/Josalo-III/GtkRadiant/releases). They bundle
+the ShaderShop plugin and the official GtkRadiant 1.6.7 gamepacks.
 
 Useful links
 ------------
 
-- [GtkRadiant website](https://icculus.org/gtkradiant/)
-- [Documentation](https://icculus.org/gtkradiant/documentation.html)
+- [ShaderShop plan and compatibility notes](docs/shadershop-plan.md)
+- [GtkRadiant documentation](https://icculus.org/gtkradiant/documentation.html)
+- [Upstream GtkRadiant](https://github.com/TTimo/GtkRadiant)
 
 Supported games
 ---------------
@@ -24,7 +35,13 @@ GtkRadiant provides level editing support for [Quake](https://en.wikipedia.org/w
 How to build
 ------------
 
-You can find more complete instructions to build on Windows [here](https://icculus.org/gtkradiant/documentation/windows_compile_guide/) and to build on Mac OS [here](apple/README.md).
+The maintained Apple-silicon macOS path, including the packaged application,
+is documented [here](apple/README.md). It builds ShaderShop and uses the
+official gamepacks rather than the historical live-SVN development packs.
+
+For other platforms, install the usual GtkRadiant build dependencies, stage the
+official `GtkRadiant-1.6.7-20230820.zip` gamepacks once, then build without
+contacting the retired pack-fetch service:
 
 The Linux version is developed and distributed via Flatpak. See [GtkRadiant on Flathub](https://flathub.org/apps/io.github.TTimo.GtkRadiant).
 
@@ -36,28 +53,33 @@ pacman -S git scons libxml2 gtk2 freeglut gtkglext subversion libjpeg-turbo
 ```
 
 ```sh
-# get the source
-git clone "https://github.com/TTimo/GtkRadiant.git"
+# get ShaderShop
+git clone "https://github.com/Josalo-III/GtkRadiant.git"
 
 # enter the source tree
 cd GtkRadiant
 
-# build everything
-scons
+# stage the verified official gamepacks (archive is not committed)
+apple/stage-official-gamepacks.sh /absolute/path/GtkRadiant-1.6.7-20230820.zip
+
+# build everything without fetching development packs
+scons --no-packs
 ```
 
 You can build a specific part like this:
 
 ```sh
 # only build the GtkRadiant level editor
-scons target="radiant"
+scons --no-packs target="radiant"
 
 # only build the q3map2 map compiler and the q3data tool
-scons target="q3map2,q3data"
+scons --no-packs target="q3map2,q3data"
 ```
 
 Level editor binary (`radiant`) and tools (like `q3map2`) will be found in `install/` directory. 
-The build process automatically fetches gamepacks.
+Use `scons --no-packs` after staging the official gamepacks. The default SCons
+pack fetcher targets historical development sources and is not part of the
+ShaderShop build path.
 
 Building on Linux with the Flatpak SDK
 --------------------------------------
